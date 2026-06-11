@@ -118,13 +118,15 @@ def evaluate_model(
     model_name: str,
     dataset_name: str = "arxiv",
     max_samples: int = None,
-    num_test_samples: int = 500,
+    num_test_samples: int = 100,
     max_input_length: int = None,
     beam_size: int = 4,
     length_penalty: float = 2.0,
     batch_size: int = 4,
     output_dir: str = "./results",
     device=None,
+    trained_model=None,
+    trained_tokenizer=None,
 ):
     set_seed(42)
     if device is None:
@@ -140,16 +142,38 @@ def evaluate_model(
 
     is_led_fact = model_config.is_led_fact
 
-    if is_led_fact:
+    checkpoint_dir = os.path.join(
+        output_dir,
+        f"{model_name}_{dataset_name}_ctx{max_input_length}",
+    )
+
+    if trained_model is not None and trained_tokenizer is not None:
+        model = trained_model
+        tokenizer = trained_tokenizer
+        model.eval()
+    elif is_led_fact:
         from models.led_fact import LEDFaCTForConditionalGeneration
         led_fact_config = get_led_fact_config(model_name)
         led_fact_config.max_input_length = max_input_length
         led_fact_config.max_target_length = model_config.max_target_length
-        model = LEDFaCTForConditionalGeneration(led_fact_config)
-        model = model.to(device)
-        tokenizer = model.tokenizer
+
+        if os.path.exists(os.path.join(checkpoint_dir, "led_fact_config.json")):
+            logger.info(f"Loading trained LED-FaCT model from {checkpoint_dir}")
+            model = LEDFaCTForConditionalGeneration.from_pretrained(checkpoint_dir)
+            model = model.to(device)
+            tokenizer = model.tokenizer
+        else:
+            logger.warning(f"No checkpoint found at {checkpoint_dir}, using untrained model")
+            model = LEDFaCTForConditionalGeneration(led_fact_config)
+            model = model.to(device)
+            tokenizer = model.tokenizer
     else:
-        model, tokenizer = load_model_and_tokenizer(model_config, device)
+        if os.path.exists(os.path.join(checkpoint_dir, "config.json")):
+            logger.info(f"Loading trained model from {checkpoint_dir}")
+            model, tokenizer = load_model_and_tokenizer(model_config, device, checkpoint_dir=checkpoint_dir)
+        else:
+            logger.warning(f"No checkpoint found at {checkpoint_dir}, using pretrained model")
+            model, tokenizer = load_model_and_tokenizer(model_config, device)
 
     if dataset_name == "arxiv":
         ds = load_arxiv_dataset(max_samples=None)
@@ -226,7 +250,7 @@ def evaluate_model(
     return results, summaries, references
 
 
-def load_model_and_tokenizer(model_config_or_name, device=None):
+def load_model_and_tokenizer(model_config_or_name, device=None, checkpoint_dir=None):
     if isinstance(model_config_or_name, str):
         model_config = get_model_config(model_config_or_name)
     else:
@@ -235,18 +259,32 @@ def load_model_and_tokenizer(model_config_or_name, device=None):
     if device is None:
         device = get_device()
 
-    tokenizer = AutoTokenizer.from_pretrained(model_config.hf_path)
+    model_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
+    tokenizer_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
+
+    if checkpoint_dir:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_config.hf_path)
 
     if model_config.is_led:
         model = LEDForConditionalGeneration.from_pretrained(
-            model_config.hf_path,
-            dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            model_path,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         )
         model.config.max_length = model_config.max_target_length
+        n_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 12
+        model.config.attention_window = [1024] * n_layers
+        model.config.attention_mode = "sliding_chunks"
+        if hasattr(model.config, 'max_source_positions'):
+            model.config.max_source_positions = model_config.max_input_length
+        else:
+            model.config.encoder.max_source_positions = model_config.max_input_length
+        tokenizer.model_max_length = model_config.max_input_length
     else:
         model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_config.hf_path,
-            dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            model_path,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         )
 
     model = model.to(device)
@@ -258,7 +296,7 @@ def evaluate_context_length_impact(
     model_name: str,
     context_lengths: List[int],
     dataset_name: str = "arxiv",
-    num_test_samples: int = 500,
+    num_test_samples: int = 100,
     beam_size: int = 4,
     output_dir: str = "./results",
 ):
@@ -296,7 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="bart-large-cnn")
     parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
     parser.add_argument("--max_input_length", type=int, default=None)
-    parser.add_argument("--num_test_samples", type=int, default=500)
+    parser.add_argument("--num_test_samples", type=int, default=100)
     parser.add_argument("--beam_size", type=int, default=4)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default="./results")

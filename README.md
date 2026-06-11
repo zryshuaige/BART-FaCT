@@ -44,7 +44,7 @@ This runs BART-Large-CNN on 100 training / 10 test samples to verify the pipelin
 # Experiment 1: Multi-model comparison
 python src/run_experiments.py --mode exp1 --dataset arxiv \
     --models "bart-large-cnn,pegasus-arxiv,led-base-16384" \
-    --max_samples 5000 --num_test 500
+    --max_samples 1000 --num_test 100
 
 # Experiment 2: Context length ablation (LED, 512→16384)
 python src/run_experiments.py --mode exp2 --dataset arxiv \
@@ -54,7 +54,7 @@ python src/run_experiments.py --mode exp2 --dataset arxiv \
 # Experiment 3: Hallucination detection (auto-runs with exp1)
 
 # Experiment 4: Generation parameter sensitivity
-python src/run_experiments.py --mode exp4 --dataset arxiv --max_samples 5000
+python src/run_experiments.py --mode exp4 --dataset arxiv --max_samples 1000
 
 # Experiment 5: Ablation studies (6 groups)
 python src/run_experiments.py --mode ablation --ablation_type all
@@ -63,7 +63,7 @@ python src/run_experiments.py --mode ablation --ablation_type all
 Or run the **complete pipeline** in one command:
 
 ```bash
-python src/run_experiments.py --mode full --dataset arxiv --max_samples 5000
+python src/run_experiments.py --mode full --dataset arxiv --max_samples 1000
 ```
 
 ---
@@ -187,7 +187,7 @@ We evaluate on three axes: **quality**, **factuality**, and **efficiency**.
 
 ```bash
 # Single model, default settings
-python src/train.py --model led-base-16384 --dataset arxiv --epochs 3 --max_samples 5000
+python src/train.py --model led-base-16384 --dataset arxiv --epochs 3 --max_samples 1000
 
 # BART baseline
 python src/train.py --model bart-large-cnn --dataset arxiv --epochs 3
@@ -214,7 +214,7 @@ python src/train.py --model led-base-16384 --context_lengths "1024,4096,16384"
 
 ```bash
 # Single model evaluation (full benchmark suite)
-python src/evaluate.py --model led-base-16384 --dataset arxiv --num_test 500
+python src/evaluate.py --model led-base-16384 --dataset arxiv --num_test 100
 
 # Context-length sweep
 python src/evaluate.py --model led-base-16384 \
@@ -248,7 +248,7 @@ Outputs per model: factuality rate, hallucination rate, intrinsic/extrinsic/cont
 ### 4.5 Ablation Studies
 
 ```bash
-# Run all 6 ablation groups (approx. 80 GPU-hours)
+# Run all 6 ablation groups (approx. 16 GPU-hours)
 python src/run_experiments.py --mode ablation --ablation_type all
 
 # Or run individually
@@ -338,17 +338,17 @@ ROUGE-L F1
 
 ## 7. Hardware Requirements
 
-| Model | Training VRAM | Inference VRAM | Est. Time (5 K samples, 3 epochs) |
+| Model | Training VRAM | Inference VRAM | Est. Time (1 K samples, 3 epochs) |
 |:---|:---:|:---:|:---|
-| BART-Large | ~8 GB | ~4 GB | 2–4 h |
-| PEGASUS | ~10 GB | ~5 GB | 3–5 h |
-| LED-Base (4096) | ~12 GB | ~6 GB | 4–6 h |
-| LED-Base (16384) | ~16 GB | ~8 GB | 8–12 h |
-| PRIMERA | ~14 GB | ~7 GB | 6–8 h |
+| BART-Large | ~8 GB | ~4 GB | 25–50 min |
+| PEGASUS | ~10 GB | ~5 GB | 35–60 min |
+| LED-Base (4096) | ~12 GB | ~6 GB | 50–70 min |
+| LED-Base (16384) | ~16 GB | ~8 GB | 1.5–2.5 h |
+| PRIMERA | ~14 GB | ~7 GB | 1–1.5 h |
 
-**Total estimated GPU time for full reproduction**: ~120 h on a single RTX 3090 / A100 equivalent.
+**Total estimated GPU time for full reproduction**: ~25 h on a single RTX 3090 / A100 equivalent.
 
-> **Tip**: Set `--max_samples 2000` to reduce training time by 60% with only minor quality loss (see A3 data-scale ablation).
+> **Tip**: Set `--max_samples 500` to reduce training time by 80% with only minor quality loss (see A3 data-scale ablation).
 
 ---
 

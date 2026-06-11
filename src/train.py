@@ -78,7 +78,21 @@ class LEDFaCTTrainer(Seq2SeqTrainer):
                         return_tensors="pt",
                     )["input_ids"].to(labels.device)
 
-                    combined_hidden = torch.cat([decoder_hidden, decoder_hidden], dim=0)
+                    perturbed_decoder_input_ids = self.led_fact_model.led.prepare_decoder_input_ids_from_labels(perturbed_labels)
+
+                    with torch.no_grad():
+                        neg_outputs = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            decoder_input_ids=perturbed_decoder_input_ids,
+                            section_ids=section_ids,
+                            input_texts=input_texts,
+                            output_hidden_states=True,
+                            return_dict=True,
+                        )
+                    neg_decoder_hidden = neg_outputs.decoder_hidden_states[-1] if neg_outputs.decoder_hidden_states else decoder_hidden.detach()
+
+                    combined_hidden = torch.cat([decoder_hidden, neg_decoder_hidden], dim=0)
                     cfl_loss, cfl_metrics = self.led_fact_model.cfl_loss(
                         decoder_hidden_states=combined_hidden,
                         labels=labels,
@@ -111,7 +125,7 @@ def load_model_and_tokenizer(model_config: ModelConfig, device=None):
     if model_config.is_led:
         model = LEDForConditionalGeneration.from_pretrained(
             model_config.hf_path,
-            dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         )
         tokenizer.model_max_length = model_config.max_input_length
 
@@ -128,7 +142,7 @@ def load_model_and_tokenizer(model_config: ModelConfig, device=None):
     else:
         model = AutoModelForSeq2SeqLM.from_pretrained(
             model_config.hf_path,
-            dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         )
 
     model = model.to(device)
@@ -136,11 +150,14 @@ def load_model_and_tokenizer(model_config: ModelConfig, device=None):
     return model, tokenizer
 
 
-def load_led_fact_model(model_config: ModelConfig, device=None):
+def load_led_fact_model(model_config: ModelConfig, device=None, led_fact_config_override=None):
     if device is None:
         device = get_device()
 
-    led_fact_config = get_led_fact_config(model_config.name)
+    if led_fact_config_override is not None:
+        led_fact_config = led_fact_config_override
+    else:
+        led_fact_config = get_led_fact_config(model_config.name)
     led_fact_config.max_input_length = model_config.max_input_length
     led_fact_config.max_target_length = model_config.max_target_length
 
@@ -162,6 +179,7 @@ def train_model(
     max_samples: int = None,
     training_config: TrainingConfig = None,
     max_input_length: int = None,
+    led_fact_config_override=None,
 ):
     set_seed(training_config.seed if training_config else 42)
 
@@ -185,7 +203,7 @@ def train_model(
     is_led_fact = model_config.is_led_fact
 
     if is_led_fact:
-        model, tokenizer = load_led_fact_model(model_config)
+        model, tokenizer = load_led_fact_model(model_config, led_fact_config_override=led_fact_config_override)
     else:
         model, tokenizer = load_model_and_tokenizer(model_config)
 
@@ -221,7 +239,6 @@ def train_model(
     )
 
     led_fact_model = model if is_led_fact else None
-    use_cfl = is_led_fact and model.get_config() if is_led_fact else None
     cfl_enabled = False
     cfl_alpha = 0.1
     if is_led_fact and led_fact_model is not None:

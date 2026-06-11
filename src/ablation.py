@@ -53,8 +53,8 @@ ABLATION_MODELS = {
 def run_single_ablation(
     ablation_name: str,
     dataset_name: str = "arxiv",
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/ablation",
     epochs: int = 3,
     learning_rate: float = 3e-5,
@@ -168,6 +168,8 @@ def run_single_ablation(
         dataset_name=dataset_name,
         num_test_samples=num_test,
         output_dir=ablation_dir,
+        trained_model=model,
+        trained_tokenizer=tokenizer,
     )
 
     from hallucination import evaluate_hallucination_for_model
@@ -211,8 +213,8 @@ def run_single_ablation(
 
 def run_all_ablations(
     dataset_name: str = "arxiv",
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/ablation",
     epochs: int = 3,
     learning_rate: float = 3e-5,
@@ -297,8 +299,8 @@ if __name__ == "__main__":
                         choices=list(ABLATION_MODELS.keys()) + ["all"],
                         help="Which ablation to run")
     parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
-    parser.add_argument("--max_samples", type=int, default=5000)
-    parser.add_argument("--num_test", type=int, default=500)
+    parser.add_argument("--max_samples", type=int, default=1000)
+    parser.add_argument("--num_test", type=int, default=100)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--batch_size", type=int, default=2)

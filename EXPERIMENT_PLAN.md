@@ -154,7 +154,7 @@ LED-FaCT在不同输入长度下的表现: 512, 1024, 2048, 4096, 8192, 16384 to
 - beam_size: 1, 2, 4, 6, 8
 - length_penalty: 0.6, 1.0, 1.5, 2.0, 2.5
 - CFL权重 α: 0.01, 0.05, 0.1, 0.2, 0.5
-- FGCA隐层维度: 64, 128, 256, 512
+- FGCA隐层维度: 32, 64, 128, 256
 - 学习率: 1e-5, 3e-5, 5e-5, 1e-4
 
 ### 实验6: 截断策略对比（短上下文模型的局限）
@@ -199,7 +199,7 @@ LED-FaCT在不同输入长度下的表现: 512, 1024, 2048, 4096, 8192, 16384 to
 pip install -r requirements.txt
 
 # 实验1: 多模型对比
-python src/run_experiments.py --mode exp1 --dataset arxiv --max_samples 5000
+python src/run_experiments.py --mode exp1 --dataset arxiv --max_samples 1000
 
 # 实验2: 消融实验（核心）
 python src/run_experiments.py --mode ablation --ablation_type all
@@ -297,12 +297,12 @@ end/
 
 ---
 
-## GPU需求估算
+## GPU需求估算（1K 样本，3 epochs）
 
 | 模型 | 显存(训练) | 显存(推理) | 预估训练时间 |
 |------|-----------|-----------|-------------|
-| BART-Large-CNN | ~8GB | ~4GB | 2-4h |
-| PEGASUS-arXiv | ~10GB | ~5GB | 3-5h |
-| LED-Base-16384 | ~16GB | ~8GB | 8-12h |
-| LED-FaCT (Full) | ~18GB | ~10GB | 10-14h |
-| LED-FaCT (各消融) | ~16-18GB | ~8-10GB | 各8-14h |
+| BART-Large-CNN | ~8GB | ~4GB | 25-50min |
+| PEGASUS-arXiv | ~10GB | ~5GB | 35-60min |
+| LED-Base-16384 | ~16GB | ~8GB | 1.5-2.5h |
+| LED-FaCT (Full) | ~16GB | ~9GB | 2-3h |
+| LED-FaCT (各消融) | ~14-16GB | ~7-9GB | 各1.5-3h |

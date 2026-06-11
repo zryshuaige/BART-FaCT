@@ -52,7 +52,7 @@ python src/run_experiments.py --mode quick_test --dataset arxiv
 # 实验1：多模型对比
 python src/run_experiments.py --mode exp1 --dataset arxiv \
     --models "bart-large-cnn,pegasus-arxiv,led-base-16384" \
-    --max_samples 5000 --num_test 500
+    --max_samples 1000 --num_test 100
 
 # 实验2：上下文长度消融（LED，512→16384）
 python src/run_experiments.py --mode exp2 --dataset arxiv \
@@ -62,7 +62,7 @@ python src/run_experiments.py --mode exp2 --dataset arxiv \
 # 实验3：幻觉检测（随实验1自动运行）
 
 # 实验4：生成参数敏感性
-python src/run_experiments.py --mode exp4 --dataset arxiv --max_samples 5000
+python src/run_experiments.py --mode exp4 --dataset arxiv --max_samples 1000
 
 # 实验5：消融实验（6组）
 python src/run_experiments.py --mode ablation --ablation_type all
@@ -71,7 +71,7 @@ python src/run_experiments.py --mode ablation --ablation_type all
 一条命令运行 **全流程**：
 
 ```bash
-python src/run_experiments.py --mode full --dataset arxiv --max_samples 5000
+python src/run_experiments.py --mode full --dataset arxiv --max_samples 1000
 ```
 
 ---
@@ -160,7 +160,7 @@ python src/run_experiments.py --mode full --dataset arxiv --max_samples 5000
 
 ```bash
 # 单模型训练，默认参数
-python src/train.py --model led-base-16384 --dataset arxiv --epochs 3 --max_samples 5000
+python src/train.py --model led-base-16384 --dataset arxiv --epochs 3 --max_samples 1000
 
 # BART 基线
 python src/train.py --model bart-large-cnn --dataset arxiv --epochs 3
@@ -187,7 +187,7 @@ python src/train.py --model led-base-16384 --context_lengths "1024,4096,16384"
 
 ```bash
 # 单模型评估（完整 benchmark）
-python src/evaluate.py --model led-base-16384 --dataset arxiv --num_test 500
+python src/evaluate.py --model led-base-16384 --dataset arxiv --num_test 100
 
 # 上下文长度扫描
 python src/evaluate.py --model led-base-16384 \
@@ -258,46 +258,46 @@ end/
 
 ## 6. GPU 耗时估算
 
-### 6.1 训练耗时（5K 样本，3 epochs）
+### 6.1 训练耗时（1K 样本，3 epochs）
 
 | 模型 | 显存 (训练) | 显存 (推理) | RTX 3060 12GB | RTX 3090 24GB | RTX 4090 24GB | A100 40GB | A100 80GB |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| BART-Large-CNN | ~8 GB | ~4 GB | 4–6 h | 2–3 h | 1.5–2 h | 1–1.5 h | 0.8–1.2 h |
-| PEGASUS-arXiv | ~10 GB | ~5 GB | 5–8 h | 3–5 h | 2–3 h | 1.5–2 h | 1–1.5 h |
-| LED-Base (4096) | ~12 GB | ~6 GB | ❌ OOM | 4–7 h | 3–5 h | 2–3 h | 1.5–2 h |
-| LED-Base (16384) | ~16 GB | ~8 GB | ❌ OOM | 8–14 h | 6–10 h | 4–6 h | 3–4 h |
-| PRIMERA | ~14 GB | ~7 GB | ❌ OOM | 6–10 h | 4–7 h | 3–4 h | 2–3 h |
-| LED-FaCT (Full) | ~18 GB | ~10 GB | ❌ OOM | 10–18 h | 8–12 h | 5–8 h | 4–6 h |
+| BART-Large-CNN | ~8 GB | ~4 GB | 50–70 min | 25–40 min | 20–25 min | 12–18 min | 10–15 min |
+| PEGASUS-arXiv | ~10 GB | ~5 GB | 1–1.5 h | 35–60 min | 25–35 min | 18–25 min | 12–18 min |
+| LED-Base (4096) | ~12 GB | ~6 GB | ❌ OOM | 50–80 min | 35–60 min | 25–35 min | 18–25 min |
+| LED-Base (16384) | ~16 GB | ~8 GB | ❌ OOM | 1.5–3 h | 1–2 h | 50–70 min | 35–50 min |
+| PRIMERA | ~14 GB | ~7 GB | ❌ OOM | 1–2 h | 50–80 min | 35–50 min | 25–35 min |
+| LED-FaCT (Full) | ~18 GB | ~10 GB | ❌ OOM | 2–3.5 h | 1.5–2.5 h | 1–1.5 h | 50–70 min |
 
 > **注意**：RTX 3060 (12GB) 仅可运行短上下文模型（BART/PEGASUS），LED 系列需 ≥16 GB 显存。
 
-### 6.2 评估耗时（500 测试样本）
+### 6.2 评估耗时（100 测试样本）
 
 | 模型 | RTX 3090 | RTX 4090 | A100 |
 |:---|:---:|:---:|:---:|
-| BART-Large-CNN | ~15 min | ~10 min | ~6 min |
-| PEGASUS-arXiv | ~20 min | ~12 min | ~8 min |
-| LED-Base-16384 | ~2 h | ~1.5 h | ~45 min |
-| LED-FaCT (Full) | ~3 h | ~2 h | ~1 h |
+| BART-Large-CNN | ~3 min | ~2 min | ~1 min |
+| PEGASUS-arXiv | ~4 min | ~2.5 min | ~1.5 min |
+| LED-Base-16384 | ~25 min | ~18 min | ~9 min |
+| LED-FaCT (Full) | ~35 min | ~25 min | ~12 min |
 
 ### 6.3 全流程耗时估算
 
 | 实验 | 说明 | RTX 3090 | RTX 4090 | A100 |
 |:---|:---|:---:|:---:|:---:|
-| E1: 多模型对比 | 4 个模型训练+评估 | ~30 h | ~20 h | ~12 h |
-| E2: 上下文消融 | 5–6 个长度训练+评估 | ~50 h | ~35 h | ~20 h |
-| E3: 幻觉分析 | NLI 推理 | ~5 h | ~3 h | ~2 h |
-| E4: 参数敏感性 | 多组参数扫描 | ~20 h | ~14 h | ~8 h |
-| E5: 模块消融 | 5 个配置训练+评估 | ~60 h | ~40 h | ~25 h |
-| **总估算** | **完整复现** | **~165 h** | **~112 h** | **~67 h** |
+| E1: 多模型对比 | 4 个模型训练+评估 | ~6 h | ~4 h | ~2.5 h |
+| E2: 上下文消融 | 5–6 个长度训练+评估 | ~10 h | ~7 h | ~4 h |
+| E3: 幻觉分析 | NLI 推理 | ~1 h | ~35 min | ~25 min |
+| E4: 参数敏感性 | 多组参数扫描 | ~4 h | ~3 h | ~1.5 h |
+| E5: 模块消融 | 5 个配置训练+评估 | ~12 h | ~8 h | ~5 h |
+| **总估算** | **完整复现** | **~33 h** | **~22 h** | **~13 h** |
 
-> **省钱建议**：设置 `--max_samples 2000` 可减少约 60% 训练时间，质量损失轻微（见数据规模消融）。使用 `gradient_accumulation_steps=4` 配合 `batch_size=2` 模拟 `batch_size=8` 效果。
+> **省钱建议**：设置 `--max_samples 500` 可减少约 80% 训练时间，质量损失轻微（见数据规模消融）。使用 `gradient_accumulation_steps=4` 配合 `batch_size=2` 模拟 `batch_size=8` 效果。
 
 ### 6.4 显存不足时的应对策略
 
 | 策略 | 命令/配置 | 效果 |
 |:---|:---|:---|
-| 减少训练数据 | `--max_samples 2000` | 训练时间 ↓60%，质量略降 |
+| 减少训练数据 | `--max_samples 500` | 训练时间 ↓80%，质量略降 |
 | 降低批次大小 | `--batch_size 1` | 显存 ↓30-40%，训练变慢 |
 | 缩短上下文 | `--max_input_length 4096` | 显存 ↓50%，长文档性能下降 |
 | CPU 训练 | 自动检测 | 极慢，仅调试用 |

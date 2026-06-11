@@ -23,8 +23,8 @@ class LEDFaCTConfig:
     use_fgca: bool = True
     use_cfl: bool = True
     section_embed_dim: int = 64
-    fgca_hidden_dim: int = 256
-    cfl_projection_dim: int = 128
+    fgca_hidden_dim: int = 64
+    cfl_projection_dim: int = 64
     cfl_temperature: float = 0.07
     cfl_alpha: float = 0.1
     dropout: float = 0.1
@@ -155,6 +155,16 @@ class LEDFaCTForConditionalGeneration(nn.Module):
                     section_ids = torch.zeros(
                         input_ids.shape[0], input_ids.shape[1],
                         dtype=torch.long, device=input_ids.device
+                    )
+
+            if section_ids.shape[1] != input_ids.shape[1]:
+                seq_len = input_ids.shape[1]
+                if section_ids.shape[1] > seq_len:
+                    section_ids = section_ids[:, :seq_len]
+                else:
+                    pad_len = seq_len - section_ids.shape[1]
+                    section_ids = torch.nn.functional.pad(
+                        section_ids, (0, pad_len), value=0
                     )
 
             input_embeds = self.section_embedding(input_embeds, section_ids)
@@ -298,6 +308,16 @@ class LEDFaCTForConditionalGeneration(nn.Module):
                     section_ids = torch.zeros(
                         input_ids.shape[0], input_ids.shape[1],
                         dtype=torch.long, device=input_ids.device
+                    )
+
+            if section_ids.shape[1] != input_ids.shape[1]:
+                seq_len = input_ids.shape[1]
+                if section_ids.shape[1] > seq_len:
+                    section_ids = section_ids[:, :seq_len]
+                else:
+                    pad_len = seq_len - section_ids.shape[1]
+                    section_ids = torch.nn.functional.pad(
+                        section_ids, (0, pad_len), value=0
                     )
 
             input_embeds = self.section_embedding(input_embeds, section_ids)

@@ -102,7 +102,7 @@ class FaithfulnessGatedDecoderLayer(nn.Module):
             cross_attn_output, self_attn_residual
         )
 
-        hybrid_output = 0.5 * decoder_output + 0.5 * (gated_output - decoder_output)
+        hybrid_output = 0.5 * decoder_output + 0.5 * gated_output
 
         if isinstance(layer_outputs, tuple):
             return (hybrid_output,) + layer_outputs[1:]

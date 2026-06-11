@@ -14,7 +14,7 @@ def sensitivity_beam_size(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     beam_sizes: List[int] = None,
-    num_test: int = 500,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if beam_sizes is None:
@@ -52,7 +52,7 @@ def sensitivity_length_penalty(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     length_penalties: List[float] = None,
-    num_test: int = 200,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if length_penalties is None:
@@ -89,8 +89,8 @@ def sensitivity_learning_rate(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     learning_rates: List[float] = None,
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if learning_rates is None:
@@ -126,6 +126,8 @@ def sensitivity_learning_rate(
                 dataset_name=dataset_name,
                 num_test_samples=num_test,
                 output_dir=os.path.join(output_dir, f"lr_{lr}"),
+                trained_model=model,
+                trained_tokenizer=tokenizer,
             )
 
             all_results[str(lr)] = {
@@ -146,29 +148,51 @@ def sensitivity_cfl_alpha(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     alphas: List[float] = None,
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if alphas is None:
         alphas = [0.01, 0.05, 0.1, 0.2, 0.5]
 
-    from models.led_fact import LEDFaCTConfig
+    from models.led_fact import LEDFaCTForConditionalGeneration
     from train import train_model
     from evaluate import evaluate_model
+    from config import get_led_fact_config
 
     all_results = {}
     for alpha in alphas:
         logger.info(f"Sensitivity: CFL alpha={alpha}")
 
-        config_override = LEDFaCTConfig(cfl_alpha=alpha)
+        led_fact_config = get_led_fact_config(model_name)
+        led_fact_config.cfl_alpha = alpha
+
+        model_config = get_model_config(model_name)
+
+        config = TrainingConfig(
+            dataset_name=dataset_name,
+            model_name=model_name,
+            max_samples=max_samples,
+            num_train_epochs=3,
+            output_dir=os.path.join(output_dir, f"cfl_alpha_{alpha}"),
+        )
 
         try:
+            trainer, model, tokenizer = train_model(
+                model_name=model_name,
+                dataset_name=dataset_name,
+                max_samples=max_samples,
+                training_config=config,
+                led_fact_config_override=led_fact_config,
+            )
+
             results, _, _ = evaluate_model(
                 model_name=model_name,
                 dataset_name=dataset_name,
                 num_test_samples=num_test,
                 output_dir=os.path.join(output_dir, f"cfl_alpha_{alpha}"),
+                trained_model=model,
+                trained_tokenizer=tokenizer,
             )
 
             all_results[str(alpha)] = {
@@ -189,23 +213,51 @@ def sensitivity_fgca_dim(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     dims: List[int] = None,
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if dims is None:
         dims = [64, 128, 256, 512]
 
+    from models.led_fact import LEDFaCTForConditionalGeneration, LEDFaCTConfig
+    from train import train_model
+    from evaluate import evaluate_model
+    from config import get_led_fact_config
+
     all_results = {}
     for dim in dims:
         logger.info(f"Sensitivity: FGCA hidden dim={dim}")
 
+        led_fact_config = get_led_fact_config(model_name)
+        led_fact_config.fgca_hidden_dim = dim
+
+        model_config = get_model_config(model_name)
+
+        config = TrainingConfig(
+            dataset_name=dataset_name,
+            model_name=model_name,
+            max_samples=max_samples,
+            num_train_epochs=3,
+            output_dir=os.path.join(output_dir, f"fgca_dim_{dim}"),
+        )
+
         try:
+            trainer, model, tokenizer = train_model(
+                model_name=model_name,
+                dataset_name=dataset_name,
+                max_samples=max_samples,
+                training_config=config,
+                led_fact_config_override=led_fact_config,
+            )
+
             results, _, _ = evaluate_model(
                 model_name=model_name,
                 dataset_name=dataset_name,
                 num_test_samples=num_test,
                 output_dir=os.path.join(output_dir, f"fgca_dim_{dim}"),
+                trained_model=model,
+                trained_tokenizer=tokenizer,
             )
 
             all_results[str(dim)] = {
@@ -226,8 +278,8 @@ def sensitivity_epochs(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
     epochs: List[int] = None,
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if epochs is None:
@@ -262,6 +314,8 @@ def sensitivity_epochs(
                 dataset_name=dataset_name,
                 num_test_samples=num_test,
                 output_dir=os.path.join(output_dir, f"epochs_{num_epochs}"),
+                trained_model=model,
+                trained_tokenizer=tokenizer,
             )
 
             train_metrics = trainer.state.log_history if hasattr(trainer, 'state') else []
@@ -289,7 +343,7 @@ def sensitivity_truncation_strategy(
     dataset_name: str = "arxiv",
     strategies: List[str] = None,
     max_input_length: int = 4096,
-    num_test: int = 500,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     if strategies is None:
@@ -302,7 +356,14 @@ def sensitivity_truncation_strategy(
 
     model_config_info = get_model_config(model_name)
     led_fact_config = get_led_fact_config(model_name)
-    model = LEDFaCTForConditionalGeneration(led_fact_config)
+
+    checkpoint_dir = os.path.join(output_dir, f"{model_name}_{dataset_name}_ctx{max_input_length}")
+    if os.path.exists(os.path.join(checkpoint_dir, "led_fact_config.json")):
+        logger.info(f"Loading trained LED-FaCT model from {checkpoint_dir}")
+        model = LEDFaCTForConditionalGeneration.from_pretrained(checkpoint_dir)
+    else:
+        logger.warning(f"No checkpoint found at {checkpoint_dir}, using untrained model")
+        model = LEDFaCTForConditionalGeneration(led_fact_config)
     model = model.to(get_device())
     tokenizer = model.tokenizer
 
@@ -339,7 +400,7 @@ def sensitivity_truncation_strategy(
         references = [sample["abstract"] for sample in test_data]
 
         summaries = generate_summaries(
-            model=model.led if hasattr(model, 'led') else model,
+            model=model,
             tokenizer=tokenizer,
             texts=truncated_texts,
             max_input_length=max_input_length,
@@ -371,8 +432,8 @@ def sensitivity_truncation_strategy(
 def run_all_sensitivity(
     model_name: str = "led-fact-full",
     dataset_name: str = "arxiv",
-    max_samples: int = 5000,
-    num_test: int = 500,
+    max_samples: int = 1000,
+    num_test: int = 100,
     output_dir: str = "./results/sensitivity",
 ):
     logger.info("=" * 60)
@@ -429,8 +490,8 @@ if __name__ == "__main__":
                         help="Which sensitivity analysis to run")
     parser.add_argument("--model", type=str, default="led-fact-full")
     parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
-    parser.add_argument("--max_samples", type=int, default=5000)
-    parser.add_argument("--num_test", type=int, default=500)
+    parser.add_argument("--max_samples", type=int, default=1000)
+    parser.add_argument("--num_test", type=int, default=100)
     parser.add_argument("--output_dir", type=str, default="./results/sensitivity")
 
     args = parser.parse_args()

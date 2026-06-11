@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 def run_experiment_1_model_comparison(
     dataset_name="arxiv",
-    max_samples=5000,
-    num_test=500,
+    max_samples=1000,
+    num_test=100,
     models=None,
     output_dir="./results",
 ):
@@ -72,6 +72,8 @@ def run_experiment_1_model_comparison(
                 dataset_name=dataset_name,
                 num_test_samples=num_test,
                 output_dir=output_dir,
+                trained_model=model,
+                trained_tokenizer=tokenizer,
             )
             all_results[model_name] = results
             all_predictions[model_name] = list(zip(summaries, references))
@@ -84,8 +86,8 @@ def run_experiment_1_model_comparison(
 
 def run_experiment_2_ablation(
     dataset_name="arxiv",
-    max_samples=5000,
-    num_test=500,
+    max_samples=1000,
+    num_test=100,
     output_dir="./results/ablation",
     ablation_list=None,
 ):
@@ -139,8 +141,8 @@ def run_experiment_4_context_length(
     model_name="led-fact-full",
     dataset_name="arxiv",
     context_lengths=None,
-    max_samples=5000,
-    num_test=500,
+    max_samples=1000,
+    num_test=100,
     output_dir="./results",
 ):
     logger.info("=" * 60)
@@ -171,8 +173,8 @@ def run_experiment_4_context_length(
 def run_experiment_5_sensitivity(
     model_name="led-fact-full",
     dataset_name="arxiv",
-    max_samples=5000,
-    num_test=500,
+    max_samples=1000,
+    num_test=100,
     output_dir="./results/sensitivity",
 ):
     logger.info("=" * 60)
@@ -191,7 +193,7 @@ def run_experiment_5_sensitivity(
 def run_experiment_6_truncation(
     model_name="led-fact-full",
     dataset_name="arxiv",
-    num_test=500,
+    num_test=100,
     output_dir="./results/sensitivity",
 ):
     logger.info("=" * 60)
@@ -208,8 +210,8 @@ def run_experiment_6_truncation(
 
 def run_full_pipeline(
     dataset_name="arxiv",
-    max_samples=5000,
-    num_test=500,
+    max_samples=1000,
+    num_test=100,
     output_dir="./results",
     models=None,
     context_lengths=None,
@@ -286,8 +288,8 @@ if __name__ == "__main__":
                                   "cfl_alpha", "fgca_dim", "epochs", "truncation"],
                         help="Which sensitivity analysis to run")
     parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
-    parser.add_argument("--max_samples", type=int, default=5000)
-    parser.add_argument("--num_test", type=int, default=500)
+    parser.add_argument("--max_samples", type=int, default=1000)
+    parser.add_argument("--num_test", type=int, default=100)
     parser.add_argument("--output_dir", type=str, default="./results")
     parser.add_argument("--models", type=str, default=None)
     parser.add_argument("--model", type=str, default="led-fact-full")
