@@ -467,7 +467,19 @@ def run_all_sensitivity(
         max_samples=max_samples, num_test=num_test, output_dir=output_dir,
     )
 
-    logger.info("\n--- Sensitivity 5: Truncation Strategy ---")
+    logger.info("\n--- Sensitivity 5: Learning Rate ---")
+    results["learning_rate"] = sensitivity_learning_rate(
+        model_name=model_name, dataset_name=dataset_name,
+        max_samples=max_samples, num_test=num_test, output_dir=output_dir,
+    )
+
+    logger.info("\n--- Sensitivity 6: Epochs ---")
+    results["epochs"] = sensitivity_epochs(
+        model_name=model_name, dataset_name=dataset_name,
+        max_samples=max_samples, num_test=num_test, output_dir=output_dir,
+    )
+
+    logger.info("\n--- Sensitivity 7: Truncation Strategy ---")
     results["truncation"] = sensitivity_truncation_strategy(
         model_name=model_name, dataset_name=dataset_name,
         num_test=num_test, output_dir=output_dir,

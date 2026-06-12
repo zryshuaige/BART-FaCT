@@ -49,6 +49,8 @@ def run_experiment_1_model_comparison(
     for model_name in models:
         logger.info(f"\n--- Training {model_name} ---")
         try:
+            model_config = get_model_config(model_name)
+            use_grad_ckpt = model_config.is_led or model_config.is_led_fact
             trainer, model, tokenizer = train_model(
                 model_name=model_name,
                 dataset_name=dataset_name,
@@ -59,6 +61,7 @@ def run_experiment_1_model_comparison(
                     max_samples=max_samples,
                     num_train_epochs=3,
                     output_dir=output_dir,
+                    gradient_checkpointing=use_grad_ckpt,
                 ),
             )
         except Exception as e:

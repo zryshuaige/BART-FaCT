@@ -148,6 +148,7 @@ class TrainingConfig:
     adam_epsilon: float = 1e-8
     max_grad_norm: float = 1.0
     fp16: bool = True
+    gradient_checkpointing: bool = False
     logging_steps: int = 100
     eval_steps: int = 500
     save_steps: int = 500

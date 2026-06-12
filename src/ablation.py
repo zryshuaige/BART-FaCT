@@ -4,7 +4,7 @@ import logging
 from typing import Dict, List
 
 import torch
-from transformers import Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
+from transformers import Seq2SeqTrainingArguments
 
 from config import (
     ModelConfig, TrainingConfig, MODEL_CONFIGS, get_model_config, get_device,
@@ -15,7 +15,7 @@ from data_utils import (
     prepare_dataset_for_model, prepare_dataset_for_led_fact, set_seed,
 )
 from models.led_fact import LEDFaCTForConditionalGeneration, LEDFaCTConfig, ABLATION_CONFIGS
-from train import LEDFaCTTrainer
+from train import LEDFaCTTrainer, LEDFaCTDataCollator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def run_single_ablation(
         max_samples=max_samples,
     )
 
-    data_collator = DataCollatorForSeq2Seq(
+    data_collator = LEDFaCTDataCollator(
         tokenizer=tokenizer,
         model=model.led,
         padding=True,

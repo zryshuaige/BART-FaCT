@@ -29,6 +29,36 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+class LEDFaCTDataCollator(DataCollatorForSeq2Seq):
+    def __call__(self, features, return_tensors=None):
+        input_texts_list = None
+        section_ids_list = None
+
+        if features and "input_texts" in features[0]:
+            input_texts_list = [f.pop("input_texts") for f in features]
+
+        if features and "section_ids" in features[0]:
+            section_ids_list = [f.pop("section_ids") for f in features]
+
+        batch = super().__call__(features, return_tensors=return_tensors)
+
+        if section_ids_list is not None:
+            max_len = max(len(s) for s in section_ids_list)
+            pad_val = 0
+            padded = []
+            for s in section_ids_list:
+                if len(s) < max_len:
+                    padded.append(s + [pad_val] * (max_len - len(s)))
+                else:
+                    padded.append(s[:max_len])
+            batch["section_ids"] = torch.tensor(padded, dtype=torch.long)
+
+        if input_texts_list is not None:
+            batch["input_texts"] = input_texts_list
+
+        return batch
+
+
 class LEDFaCTTrainer(Seq2SeqTrainer):
     def __init__(self, *args, led_fact_model=None, use_cfl=False, cfl_alpha=0.1, **kwargs):
         super().__init__(*args, **kwargs)
@@ -148,6 +178,7 @@ def load_model_and_tokenizer(model_config: ModelConfig, device=None):
     else:
         model = AutoModelForSeq2SeqLM.from_pretrained(
             model_config.hf_path,
+            ignore_mismatched_sizes=True,
         )
 
     model = model.to(device)
@@ -237,11 +268,18 @@ def train_model(
             is_led=model_config.is_led,
         )
 
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model.led if is_led_fact else model,
-        padding=True,
-    )
+    if is_led_fact:
+        data_collator = LEDFaCTDataCollator(
+            tokenizer=tokenizer,
+            model=model.led,
+            padding=True,
+        )
+    else:
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer,
+            model=model,
+            padding=True,
+        )
 
     led_fact_model = model if is_led_fact else None
     cfl_enabled = False
@@ -262,6 +300,7 @@ def train_model(
         adam_epsilon=training_config.adam_epsilon,
         max_grad_norm=training_config.max_grad_norm,
         fp16=training_config.fp16 and get_device().type == "cuda",
+        gradient_checkpointing=training_config.gradient_checkpointing,
         logging_steps=training_config.logging_steps,
         eval_strategy="steps" if "validation" in dataset else "no",
         eval_steps=training_config.eval_steps if "validation" in dataset else None,
@@ -272,11 +311,11 @@ def train_model(
         report_to=["tensorboard"],
         load_best_model_at_end=True if "validation" in dataset else False,
         metric_for_best_model="eval_loss" if "validation" in dataset else None,
-seed=training_config.seed,
+        seed=training_config.seed,
         remove_unused_columns=False if is_led_fact else True,
         dataloader_num_workers=0 if get_device().type == "cpu" else 4,
         dataloader_pin_memory=get_device().type == "cuda",
-     )
+    )
 
     trainer_kwargs = dict(
         model=model,
