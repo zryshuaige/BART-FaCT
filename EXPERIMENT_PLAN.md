@@ -12,11 +12,11 @@
 
 在LED (Longformer Encoder-Decoder) 基线模型上，提出三个创新模块：
 
-### 模块1: Section-Aware Embedding (SAE) — 章节感知嵌入
+### 模块1: Section-Aware Embedding (SAE) — 篇章结构感知嵌入
 
-**动机**: 科学文献有明确的章节结构（摘要→引言→方法→实验→结论），但传统模型将全文视为扁平token序列，无法感知文档结构。
+**动机**: 科学文献有明确的层级结构（摘要→引言→方法→实验→结论），但传统模型将全文视为扁平token序列，无法感知文档的篇章结构。
 
-**方法**: 对输入文本自动检测章节边界，为每个token分配章节类型ID，通过可学习的section embedding矩阵将章节信息注入编码器：
+**方法**: 基于规则检测章节边界，为每个token分配篇章类型ID，通过可学习的section embedding矩阵将篇章信息注入编码器：
 
 ```
 input_embedding = word_embed(token_ids) + position_embed(position_ids) + section_embed(section_ids)
@@ -24,11 +24,11 @@ input_embedding = word_embed(token_ids) + position_embed(position_ids) + section
 
 **章节类型**: `[PAD, ABSTRACT, INTRODUCTION, METHOD, EXPERIMENT, RESULT, CONCLUSION, OTHER]`
 
-### 模块2: Faithfulness-Guided Cross-Attention (FGCA) — 忠实度门控交叉注意力
+### 模块2: Faithfulness-Guided Cross-Attention (FGCA) — 事实忠实度门控交叉注意力
 
-**动机**: 生成式摘要模型容易产生幻觉内容，即生成与原文不一致的信息。现有方法在解码时对所有源文信息一视同仁，缺少对忠实度的显式控制。
+**动机**: 生成式摘要模型容易产生幻觉内容，即生成与原文不一致的信息。现有方法在解码时对所有源文信息一视同仁，缺少对事实忠实度的显式控制。
 
-**方法**: 在解码器每个交叉注意力层后，插入一个可学习的忠实度门控（Faithfulness Gate），动态调节解码状态对源文信息的依赖：
+**方法**: 在解码器每个交叉注意力层后，插入一个可学习的事实忠实度门控（Faithfulness Gate），动态调节解码状态对源文信息的依赖：
 
 ```
 gate = σ(W_g · [cross_attn_output ⊕ self_attn_output] + b_g)
@@ -36,9 +36,9 @@ gated_output = gate ⊙ cross_attn_output + (1 - gate) ⊙ self_attn_output
 hybrid_output = 0.5 · decoder_output + 0.5 · gated_output
 ```
 
-当门控值接近1时，解码器更依赖源文信息（忠实）；接近0时，允许模型自主生成（灵活性）。最终输出取解码器原始输出与门控输出的等权混合，确保残差连接稳定训练。
+当门控值趋1时，解码器更依赖源文信息（忠实）；趋0时，允许模型自主生成（灵活性）。最终输出取解码器原始输出与门控输出的等权混合，确保残差连接稳定训练。
 
-### 模块3: Contrastive Factuality Loss (CFL) — 对比事实性损失
+### 模块3: Contrastive Factuality Loss (CFL) — 对比式事实性损失
 
 **动机**: 标准交叉熵损失只优化生成概率，不直接约束事实一致性。需要有显式的训练信号让模型区分忠实摘要与非忠实摘要。
 
