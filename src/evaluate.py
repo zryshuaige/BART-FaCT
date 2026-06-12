@@ -273,7 +273,8 @@ def load_model_and_tokenizer(model_config_or_name, device=None, checkpoint_dir=N
         )
         model.config.max_length = model_config.max_target_length
         n_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 12
-        model.config.attention_window = [1024] * n_layers
+        attn_window = min(1024, model_config.max_input_length // 2)
+        model.config.attention_window = [attn_window] * n_layers
         model.config.attention_mode = "sliding_chunks"
         if hasattr(model.config, 'max_source_positions'):
             model.config.max_source_positions = model_config.max_input_length

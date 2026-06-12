@@ -1,6 +1,7 @@
 import copy
+import json
 from typing import Optional, List, Dict, Tuple, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 import torch
 import torch.nn as nn
@@ -44,6 +45,16 @@ class LEDFaCTConfig:
         if not parts:
             return "led_baseline"
         return "led_fact_" + "_".join(parts)
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+    def to_json_string(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict) -> "LEDFaCTConfig":
+        return cls(**{k: v for k, v in config_dict.items() if k in cls.__dataclass_fields__})
 
 
 ABLATION_CONFIGS = {
@@ -190,13 +201,14 @@ class LEDFaCTForConditionalGeneration(nn.Module):
             if not embed_grad_orig:
                 self.led.base_model.encoder.embed_tokens.requires_grad_(False)
 
+            encoder_outputs_obj = BaseModelOutput(last_hidden_state=encoder_hidden_states)
             outputs = self.led(
                 input_ids=None,
                 attention_mask=attention_mask,
                 global_attention_mask=global_attention_mask,
                 decoder_input_ids=decoder_input_ids,
                 decoder_attention_mask=decoder_attention_mask,
-                encoder_outputs=(encoder_hidden_states,),
+                encoder_outputs=encoder_outputs_obj,
                 labels=labels,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -297,22 +309,21 @@ class LEDFaCTForConditionalGeneration(nn.Module):
         import os
         os.makedirs(save_directory, exist_ok=True)
 
-        import json
-        config_dict = {
-            "use_sae": self.config.use_sae,
-            "use_fgca": self.config.use_fgca,
-            "use_cfl": self.config.use_cfl,
-            "section_embed_dim": self.config.section_embed_dim,
-            "fgca_hidden_dim": self.config.fgca_hidden_dim,
-            "cfl_projection_dim": self.config.cfl_projection_dim,
-            "cfl_temperature": self.config.cfl_temperature,
-            "cfl_alpha": self.config.cfl_alpha,
-            "base_model_name": self.config.base_model_name,
-            "max_input_length": self.config.max_input_length,
-            "max_target_length": self.config.max_target_length,
-        }
         with open(os.path.join(save_directory, "led_fact_config.json"), "w") as f:
-            json.dump(config_dict, f, indent=2)
+            f.write(self.config.to_json_string())
+
+        if self.use_sae:
+            torch.save(self.section_embedding.state_dict(),
+                       os.path.join(save_directory, "section_embedding.pt"))
+        if self.use_fgca:
+            fgca_state = {}
+            for i, layer in enumerate(self.led.base_model.decoder.layers):
+                if isinstance(layer, FaithfulnessGatedDecoderLayer):
+                    fgca_state[f"layer_{i}"] = layer.faithfulness_gate.state_dict()
+            torch.save(fgca_state, os.path.join(save_directory, "fgca_gates.pt"))
+        if self.use_cfl:
+            torch.save(self.cfl_loss.state_dict(),
+                       os.path.join(save_directory, "cfl_loss.pt"))
 
         if self.use_fgca:
             original_layers = {}
@@ -333,32 +344,18 @@ class LEDFaCTForConditionalGeneration(nn.Module):
                     gate_hidden_dim=self.config.fgca_hidden_dim,
                     dropout=self.config.dropout,
                 )
-                fgca_gate_state = self.led.base_model.decoder.layers[i].state_dict()
                 self.led.base_model.decoder.layers[i] = gated_layer
-                self.led.base_model.decoder.layers[i].load_state_dict(fgca_gate_state, strict=False)
-
-        if self.use_sae:
-            torch.save(self.section_embedding.state_dict(),
-                       os.path.join(save_directory, "section_embedding.pt"))
-        if self.use_fgca:
-            fgca_state = {}
-            for i, layer in enumerate(self.led.base_model.decoder.layers):
-                if isinstance(layer, FaithfulnessGatedDecoderLayer):
-                    fgca_state[f"layer_{i}"] = layer.faithfulness_gate.state_dict()
-            torch.save(fgca_state, os.path.join(save_directory, "fgca_gates.pt"))
-        if self.use_cfl:
-            torch.save(self.cfl_loss.state_dict(),
-                       os.path.join(save_directory, "cfl_loss.pt"))
+                self.led.base_model.decoder.layers[i].faithfulness_gate.load_state_dict(
+                    fgca_state[f"layer_{i}"]
+                )
 
     @classmethod
     def from_pretrained(cls, load_directory: str, config_override: LEDFaCTConfig = None):
-        import os, json
+        import os
 
         config_path = os.path.join(load_directory, "led_fact_config.json")
         with open(config_path, "r") as f:
-            config_dict = json.load(f)
-
-        config = LEDFaCTConfig(**config_dict)
+            config = LEDFaCTConfig.from_dict(json.load(f))
         if config_override is not None:
             config.use_sae = config_override.use_sae
             config.use_fgca = config_override.use_fgca
@@ -376,12 +373,26 @@ class LEDFaCTForConditionalGeneration(nn.Module):
         if model.use_sae:
             sae_path = os.path.join(load_directory, "section_embedding.pt")
             if os.path.exists(sae_path):
-                model.section_embedding.load_state_dict(torch.load(sae_path, map_location="cpu"))
+                model.section_embedding.load_state_dict(
+                    torch.load(sae_path, map_location="cpu", weights_only=True)
+                )
+
+        if model.use_fgca:
+            fgca_path = os.path.join(load_directory, "fgca_gates.pt")
+            if os.path.exists(fgca_path):
+                fgca_state = torch.load(fgca_path, map_location="cpu", weights_only=True)
+                for i, layer in enumerate(model.led.base_model.decoder.layers):
+                    if isinstance(layer, FaithfulnessGatedDecoderLayer):
+                        key = f"layer_{i}"
+                        if key in fgca_state:
+                            layer.faithfulness_gate.load_state_dict(fgca_state[key])
 
         if model.use_cfl:
             cfl_path = os.path.join(load_directory, "cfl_loss.pt")
             if os.path.exists(cfl_path):
-                model.cfl_loss.load_state_dict(torch.load(cfl_path, map_location="cpu"))
+                model.cfl_loss.load_state_dict(
+                    torch.load(cfl_path, map_location="cpu", weights_only=True)
+                )
 
         return model
 

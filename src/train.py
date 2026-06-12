@@ -272,10 +272,11 @@ def train_model(
         report_to=["tensorboard"],
         load_best_model_at_end=True if "validation" in dataset else False,
         metric_for_best_model="eval_loss" if "validation" in dataset else None,
-        seed=training_config.seed,
+seed=training_config.seed,
+        remove_unused_columns=False if is_led_fact else True,
         dataloader_num_workers=0 if get_device().type == "cpu" else 4,
         dataloader_pin_memory=get_device().type == "cuda",
-    )
+     )
 
     trainer_kwargs = dict(
         model=model,
@@ -301,7 +302,7 @@ def train_model(
 
     if is_led_fact and led_fact_model is not None:
         led_fact_model.save_pretrained(output_dir)
-        logger.info(f"LED-FaCT model saved to {output_dir}")
+        led_fact_model.tokenizer.save_pretrained(output_dir)
     else:
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)

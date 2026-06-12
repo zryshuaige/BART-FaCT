@@ -194,4 +194,4 @@ def get_model_config(model_name: str) -> ModelConfig:
         raise ValueError(
             f"Unknown model: {model_name}. Available: {list(MODEL_CONFIGS.keys())}"
         )
-    return MODEL_CONFIGS[model_name]
+    return copy.deepcopy(MODEL_CONFIGS[model_name])

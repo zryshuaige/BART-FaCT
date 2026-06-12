@@ -139,12 +139,13 @@ def run_single_ablation(
         generation_max_length=config_copy.max_target_length,
         report_to=[],
         seed=42,
+        remove_unused_columns=False,
         dataloader_num_workers=0 if device.type == "cpu" else 4,
         dataloader_pin_memory=device.type == "cuda",
     )
 
     trainer = LEDFaCTTrainer(
-        model=model.led,
+        model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation", None),
