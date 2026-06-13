@@ -140,7 +140,7 @@ def run_single_ablation(
     use_cpo = config_copy.use_cpo
     cpo_alpha = config_copy.cpo_alpha
 
-    training_args = Seq2SeqTrainingArguments(
+    ablation_kwargs = dict(
         output_dir=os.path.join(ablation_dir, "checkpoints"),
         learning_rate=learning_rate,
         per_device_train_batch_size=batch_size,
@@ -152,7 +152,6 @@ def run_single_ablation(
         fp16=device.type == "cuda",
         gradient_checkpointing=False,
         logging_steps=50,
-        evaluation_strategy="no",
         save_steps=500,
         save_total_limit=2,
         predict_with_generate=True,
@@ -163,6 +162,14 @@ def run_single_ablation(
         dataloader_num_workers=0 if device.type == "cpu" else 2,
         dataloader_pin_memory=device.type == "cuda",
     )
+    try:
+        training_args = Seq2SeqTrainingArguments(
+            **ablation_kwargs, eval_strategy="no"
+        )
+    except TypeError:
+        training_args = Seq2SeqTrainingArguments(
+            **ablation_kwargs, evaluation_strategy="no"
+        )
 
     trainer = BARTFaCTTrainer(
         model=model,

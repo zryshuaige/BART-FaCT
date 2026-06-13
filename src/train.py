@@ -372,7 +372,9 @@ def train_model(
         cpo_enabled = bart_fact_model.config.use_cpo
         cpo_alpha = bart_fact_model.config.cpo_alpha
 
-    training_args = Seq2SeqTrainingArguments(
+    # Build kwargs dict first so we can auto-detect eval_strategy vs evaluation_strategy
+    eval_strategy_val = "steps" if "validation" in dataset else "no"
+    training_kwargs = dict(
         output_dir=output_dir,
         learning_rate=training_config.learning_rate,
         per_device_train_batch_size=training_config.per_device_train_batch_size,
@@ -386,7 +388,6 @@ def train_model(
         fp16=training_config.fp16 and get_device().type == "cuda",
         gradient_checkpointing=training_config.gradient_checkpointing,
         logging_steps=training_config.logging_steps,
-        evaluation_strategy="steps" if "validation" in dataset else "no",
         eval_steps=training_config.eval_steps if "validation" in dataset else None,
         save_steps=training_config.save_steps,
         save_total_limit=training_config.save_total_limit,
@@ -400,6 +401,15 @@ def train_model(
         dataloader_num_workers=0 if get_device().type == "cpu" else 2,
         dataloader_pin_memory=get_device().type == "cuda",
     )
+    # Auto-detect: transformers>=4.45 uses 'eval_strategy', older uses 'evaluation_strategy'
+    try:
+        training_args = Seq2SeqTrainingArguments(
+            **training_kwargs, eval_strategy=eval_strategy_val
+        )
+    except TypeError:
+        training_args = Seq2SeqTrainingArguments(
+            **training_kwargs, evaluation_strategy=eval_strategy_val
+        )
 
     trainer_kwargs = dict(
         model=model,
