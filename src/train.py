@@ -69,6 +69,16 @@ class LEDFaCTTrainer(Seq2SeqTrainer):
         self.use_cfl = use_cfl
         self.cfl_alpha = cfl_alpha
 
+    def save_model(self, output_dir=None, _internal_call=False):
+        if self.led_fact_model is not None:
+            import os
+            output_dir = output_dir if output_dir is not None else self.args.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            self.led_fact_model.save_pretrained(output_dir)
+            self.led_fact_model.tokenizer.save_pretrained(output_dir)
+        else:
+            super().save_model(output_dir=output_dir, _internal_call=_internal_call)
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         is_led_fact = self.led_fact_model is not None
 
@@ -174,7 +184,7 @@ def load_model_and_tokenizer(model_config: ModelConfig, device=None):
                 min(1024, model_config.max_input_length // 2)
             ] * n_layers
 
-        model.config.max_length = model_config.max_target_length
+        model.generation_config.max_length = model_config.max_target_length
         model.config.eos_token_id = tokenizer.eos_token_id
         model.config.decoder_start_token_id = tokenizer.bos_token_id or tokenizer.cls_token_id
 
@@ -342,11 +352,8 @@ def train_model(
     metrics = train_result.metrics
     trainer.save_metrics("train", metrics)
 
-    if is_led_fact and led_fact_model is not None:
-        led_fact_model.save_pretrained(output_dir)
-        led_fact_model.tokenizer.save_pretrained(output_dir)
-    else:
-        trainer.save_model(output_dir)
+    trainer.save_model(output_dir)
+    if not is_led_fact:
         tokenizer.save_pretrained(output_dir)
 
     logger.info(f"Training complete. Metrics: {metrics}")

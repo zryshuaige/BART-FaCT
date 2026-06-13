@@ -136,7 +136,7 @@ class LEDFaCTForConditionalGeneration(nn.Module):
         num_layers = self.led.config.num_hidden_layers
         self.led.config.attention_window = [1024] * num_layers
         self.led.config.attention_mode = "sliding_chunks"
-        self.led.config.max_length = self.config.max_target_length
+        self.led.generation_config.max_length = self.config.max_target_length
         self.led.config.eos_token_id = self.tokenizer.eos_token_id
         self.led.config.decoder_start_token_id = self.tokenizer.bos_token_id or self.tokenizer.cls_token_id
 
@@ -326,7 +326,7 @@ class LEDFaCTForConditionalGeneration(nn.Module):
 
         return outputs
 
-    def save_pretrained(self, save_directory: str):
+    def save_pretrained(self, save_directory: str, **kwargs):
         import os
         os.makedirs(save_directory, exist_ok=True)
 
@@ -338,34 +338,21 @@ class LEDFaCTForConditionalGeneration(nn.Module):
                        os.path.join(save_directory, "section_embedding.pt"))
         if self.use_fgca:
             fgca_state = {}
+            original_fgca_layers = {}
             for i, layer in enumerate(self.led.base_model.decoder.layers):
                 if isinstance(layer, FaithfulnessGatedDecoderLayer):
                     fgca_state[f"layer_{i}"] = layer.faithfulness_gate.state_dict()
-            torch.save(fgca_state, os.path.join(save_directory, "fgca_gates.pt"))
-
-            original_layers = {}
-            for i, layer in enumerate(self.led.base_model.decoder.layers):
-                if isinstance(layer, FaithfulnessGatedDecoderLayer):
-                    original_layers[i] = layer.original_layer
+                    original_fgca_layers[i] = layer
                     self.led.base_model.decoder.layers[i] = layer.original_layer
 
         try:
             led_path = os.path.join(save_directory, "led_base")
-            self.led.save_pretrained(led_path)
+            self.led.save_pretrained(led_path, safe_serialization=False)
             self.tokenizer.save_pretrained(led_path)
         finally:
             if self.use_fgca:
-                for i, orig_layer in original_layers.items():
-                    gated_layer = FaithfulnessGatedDecoderLayer(
-                        original_decoder_layer=orig_layer,
-                        hidden_size=self.led.config.d_model,
-                        gate_hidden_dim=self.config.fgca_hidden_dim,
-                        dropout=self.config.dropout,
-                    )
+                for i, gated_layer in original_fgca_layers.items():
                     self.led.base_model.decoder.layers[i] = gated_layer
-                    self.led.base_model.decoder.layers[i].faithfulness_gate.load_state_dict(
-                        fgca_state[f"layer_{i}"]
-                    )
 
         if self.use_cfl:
             torch.save(self.cfl_loss.state_dict(),

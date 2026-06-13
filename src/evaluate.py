@@ -287,7 +287,7 @@ def load_model_and_tokenizer(model_config_or_name, device=None, checkpoint_dir=N
         model = LEDForConditionalGeneration.from_pretrained(
             model_path,
         )
-        model.config.max_length = model_config.max_target_length
+        model.generation_config.max_length = model_config.max_target_length
         n_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 12
         attn_window = min(1024, model_config.max_input_length // 2)
         model.config.attention_window = [attn_window] * n_layers
