@@ -1,20 +1,32 @@
 # Install: pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # (Remove -i flag if not in China)
-
-torch>=2.6.0
+#
+# Core
+torch>=2.0.0
 transformers>=4.35.0
 datasets>=2.14.0
 accelerate>=0.24.0
+
+# Evaluation metrics
 rouge-score>=0.1.2
 bert-score>=0.3.13
 nltk>=3.8
+
+# Visualization & analysis
 matplotlib>=3.7.0
 seaborn>=0.12.0
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
+
+# Utilities
 tqdm>=4.65.0
-sentencepiece>=0.1.99
-sacremoses>=0.1.1
 tensorboard>=2.14.0
-sentence-transformers>=2.2.0
+
+# Tokenizer backends (required by PEGASUS / some HF tokenizers)
+sentencepiece>=0.1.99
+protobuf>=4.21.0
+
+# Notebook support (for notebooks/*.ipynb)
+ipykernel>=6.0.0
+ipywidgets>=8.0.0

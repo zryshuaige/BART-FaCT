@@ -14,6 +14,7 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
 def _setup_chinese_font():
     chinese_fonts = [
         "SimHei", "Microsoft YaHei", "STHeiti", "WenQuanYi Micro Hei",
@@ -23,66 +24,55 @@ def _setup_chinese_font():
     available = {f.name for f in fm.fontManager.ttflist}
     for font_name in chinese_fonts:
         if font_name in available:
-            plt.rcParams["font.sans-serif"] = [font_name] + plt.rcParams.get("font.sans-serif", ["DejaVu Sans"])
+            plt.rcParams["font.sans-serif"] = [font_name] + plt.rcParams.get(
+                "font.sans-serif", ["DejaVu Sans"]
+            )
             logger.info(f"Using Chinese font: {font_name}")
             break
     else:
-        logger.warning("No Chinese font found. Chinese characters may not display correctly in plots.")
+        logger.warning(
+            "No Chinese font found. Chinese characters may not display correctly."
+        )
+
 
 _setup_chinese_font()
 plt.rcParams["axes.unicode_minus"] = False
 
 COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#F44336", "#9C27B0", "#00BCD4", "#795548"]
 
+# ── Display name maps ──────────────────────────────────────────────────
+
 MODEL_DISPLAY_NAMES = {
-    "bart-large": "BART-Large",
     "bart-large-cnn": "BART-Large-CNN",
+    "pegasus-cnn_dailymail": "PEGASUS-CNN/DM",
     "pegasus-arxiv": "PEGASUS-arXiv",
-    "pegasus-pubmed": "PEGASUS-PubMed",
-    "led-base-16384": "LED-Base-16K",
-    "led-baseline": "LED (Baseline)",
-    "primera": "PRIMERA",
-    "led-fact-full": "LED-FaCT (Full)",
-    "led-fact-no-sae": "LED-FaCT w/o SAE",
-    "led-fact-no-fgca": "LED-FaCT w/o FGCA",
-    "led-fact-no-cfl": "LED-FaCT w/o CFL",
+    "pegasus-xsum": "PEGASUS-XSum",
+    "distilbart-cnn-12-6": "DistilBART-CNN",
+    "bart-baseline": "BART (Baseline)",
+    "bart-fact-full": "BART-FaCT (Full)",
+    "bart-fact-no-hse": "BART-FaCT w/o HSE",
+    "bart-fact-no-cfa": "BART-FaCT w/o CFA",
+    "bart-fact-no-cpo": "BART-FaCT w/o CPO",
 }
 
 ABLATION_DISPLAY_NAMES = {
-    "led_baseline": "LED (Baseline)",
-    "led_fact_no_sae": "w/o SAE",
-    "led_fact_no_fgca": "w/o FGCA",
-    "led_fact_no_cfl": "w/o CFL",
-    "led_fact_full": "LED-FaCT (Full)",
+    "bart_baseline": "BART (Baseline)",
+    "bart_fact_no_hse": "w/o HSE",
+    "bart_fact_no_cfa": "w/o CFA",
+    "bart_fact_no_cpo": "w/o CPO",
+    "bart_fact_full": "BART-FaCT (Full)",
 }
 
 ABLATION_SHORT_NAMES = {
-    "led_baseline": "Baseline",
-    "led_fact_no_sae": "-SAE",
-    "led_fact_no_fgca": "-FGCA",
-    "led_fact_no_cfl": "-CFL",
-    "led_fact_full": "Full",
+    "bart_baseline": "Baseline",
+    "bart_fact_no_hse": "-HSE",
+    "bart_fact_no_cfa": "-CFA",
+    "bart_fact_no_cpo": "-CPO",
+    "bart_fact_full": "Full",
 }
 
 
-def load_results(results_dir: str, model_name: str, dataset_name: str) -> Optional[Dict]:
-    for ctx_len in [512, 1024, 2048, 4096, 8192]:
-        path = os.path.join(results_dir, f"{model_name}_{dataset_name}_ctx{ctx_len}", "eval_results.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-    return None
-
-
-def load_context_length_results(results_dir: str, pattern: str = "context_length_impact") -> Dict:
-    all_results = {}
-    for fname in os.listdir(results_dir):
-        if pattern in fname and fname.endswith(".json"):
-            path = os.path.join(results_dir, fname)
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            all_results[fname] = data
-    return all_results
+# ── Plotting functions ─────────────────────────────────────────────────
 
 
 def plot_rouge_comparison(
@@ -100,30 +90,53 @@ def plot_rouge_comparison(
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     display_names = [MODEL_DISPLAY_NAMES.get(m, m) for m in models]
 
-    for idx, (metric, values, title) in enumerate([
-        ("ROUGE-1", rouge1_f, "ROUGE-1 F1"),
-        ("ROUGE-2", rouge2_f, "ROUGE-2 F1"),
-        ("ROUGE-L", rougeL_f, "ROUGE-L F1"),
-    ]):
-        bars = axes[idx].bar(range(len(models)), values, color=COLORS[:len(models)])
+    for idx, (metric, values, title) in enumerate(
+        [
+            ("ROUGE-1", rouge1_f, "ROUGE-1 F1"),
+            ("ROUGE-2", rouge2_f, "ROUGE-2 F1"),
+            ("ROUGE-L", rougeL_f, "ROUGE-L F1"),
+        ]
+    ):
+        bars = axes[idx].bar(range(len(models)), values, color=COLORS[: len(models)])
         axes[idx].set_xticks(range(len(models)))
         axes[idx].set_xticklabels(display_names, rotation=45, ha="right", fontsize=10)
         axes[idx].set_ylabel("F1 Score", fontsize=11)
         axes[idx].set_title(title, fontsize=13, fontweight="bold")
         axes[idx].set_ylim(0, max(values) * 1.2)
         for bar, val in zip(bars, values):
-            axes[idx].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
-                          f"{val:.4f}", ha="center", va="bottom", fontsize=9)
+            axes[idx].text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.005,
+                f"{val:.4f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
 
-    plt.suptitle(f"Model Performance Comparison ({dataset_name.upper()})", fontsize=15, fontweight="bold")
+    plt.suptitle(
+        f"Model Performance Comparison ({dataset_name.upper()})",
+        fontsize=15,
+        fontweight="bold",
+    )
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, "rouge_comparison.png"), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(output_path, "rouge_comparison.pdf"), bbox_inches="tight")
+    plt.savefig(
+        os.path.join(output_path, "rouge_comparison.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.savefig(
+        os.path.join(output_path, "rouge_comparison.pdf"), bbox_inches="tight"
+    )
     plt.close()
 
-    df = pd.DataFrame({
-        "Model": display_names, "ROUGE-1": rouge1_f, "ROUGE-2": rouge2_f, "ROUGE-L": rougeL_f,
-    })
+    df = pd.DataFrame(
+        {
+            "Model": display_names,
+            "ROUGE-1": rouge1_f,
+            "ROUGE-2": rouge2_f,
+            "ROUGE-L": rougeL_f,
+        }
+    )
     df.to_csv(os.path.join(output_path, "rouge_comparison.csv"), index=False)
     return df
 
@@ -134,8 +147,20 @@ def plot_ablation_comparison(
 ):
     os.makedirs(output_path, exist_ok=True)
 
-    ablation_order = ["led_baseline", "led_fact_no_sae", "led_fact_no_fgca", "led_fact_no_cfl", "led_fact_full"]
-    available = [k for k in ablation_order if k in ablation_results and isinstance(ablation_results[k], dict) and "error" not in ablation_results[k]]
+    ablation_order = [
+        "bart_baseline",
+        "bart_fact_no_hse",
+        "bart_fact_no_cfa",
+        "bart_fact_no_cpo",
+        "bart_fact_full",
+    ]
+    available = [
+        k
+        for k in ablation_order
+        if k in ablation_results
+        and isinstance(ablation_results[k], dict)
+        and "error" not in ablation_results[k]
+    ]
 
     if not available:
         logger.warning("No ablation results available for plotting")
@@ -152,9 +177,15 @@ def plot_ablation_comparison(
         r = ablation_results[k]
         if "eval_results" in r:
             eval_r = r["eval_results"]
-            rouge1_scores.append(eval_r.get("rouge", {}).get("rouge1", {}).get("fmeasure", 0))
-            rouge2_scores.append(eval_r.get("rouge", {}).get("rouge2", {}).get("fmeasure", 0))
-            rougeL_scores.append(eval_r.get("rouge", {}).get("rougeL", {}).get("fmeasure", 0))
+            rouge1_scores.append(
+                eval_r.get("rouge", {}).get("rouge1", {}).get("fmeasure", 0)
+            )
+            rouge2_scores.append(
+                eval_r.get("rouge", {}).get("rouge2", {}).get("fmeasure", 0)
+            )
+            rougeL_scores.append(
+                eval_r.get("rouge", {}).get("rougeL", {}).get("fmeasure", 0)
+            )
         else:
             rouge1_scores.append(0)
             rouge2_scores.append(0)
@@ -171,7 +202,7 @@ def plot_ablation_comparison(
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    axes[0, 0].bar(range(len(names)), rouge1_scores, color=COLORS[:len(names)])
+    axes[0, 0].bar(range(len(names)), rouge1_scores, color=COLORS[: len(names)])
     axes[0, 0].set_xticks(range(len(names)))
     axes[0, 0].set_xticklabels(names, fontsize=10)
     axes[0, 0].set_ylabel("F1 Score", fontsize=11)
@@ -179,7 +210,7 @@ def plot_ablation_comparison(
     for i, v in enumerate(rouge1_scores):
         axes[0, 0].text(i, v + 0.002, f"{v:.4f}", ha="center", fontsize=8)
 
-    axes[0, 1].bar(range(len(names)), rouge2_scores, color=COLORS[:len(names)])
+    axes[0, 1].bar(range(len(names)), rouge2_scores, color=COLORS[: len(names)])
     axes[0, 1].set_xticks(range(len(names)))
     axes[0, 1].set_xticklabels(names, fontsize=10)
     axes[0, 1].set_ylabel("F1 Score", fontsize=11)
@@ -187,7 +218,7 @@ def plot_ablation_comparison(
     for i, v in enumerate(rouge2_scores):
         axes[0, 1].text(i, v + 0.002, f"{v:.4f}", ha="center", fontsize=8)
 
-    axes[1, 0].bar(range(len(names)), rougeL_scores, color=COLORS[:len(names)])
+    axes[1, 0].bar(range(len(names)), rougeL_scores, color=COLORS[: len(names)])
     axes[1, 0].set_xticks(range(len(names)))
     axes[1, 0].set_xticklabels(names, fontsize=10)
     axes[1, 0].set_ylabel("F1 Score", fontsize=11)
@@ -198,31 +229,54 @@ def plot_ablation_comparison(
     if any(s > 0 for s in fact_scores):
         width = 0.35
         x = np.arange(len(names))
-        axes[1, 1].bar(x - width / 2, fact_scores, width, label="Factuality", color=COLORS[1])
-        axes[1, 1].bar(x + width / 2, hall_scores, width, label="Hallucination", color=COLORS[3])
+        axes[1, 1].bar(
+            x - width / 2, fact_scores, width, label="Factuality", color=COLORS[1]
+        )
+        axes[1, 1].bar(
+            x + width / 2, hall_scores, width, label="Hallucination", color=COLORS[3]
+        )
         axes[1, 1].set_xticks(x)
         axes[1, 1].set_xticklabels(names, fontsize=10)
         axes[1, 1].set_ylabel("Rate", fontsize=11)
-        axes[1, 1].set_title("Factuality vs Hallucination", fontsize=13, fontweight="bold")
+        axes[1, 1].set_title(
+            "Factuality vs Hallucination", fontsize=13, fontweight="bold"
+        )
         axes[1, 1].legend(fontsize=10)
 
     plt.suptitle("Module Ablation Study Results", fontsize=15, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, "ablation_comparison.png"), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(output_path, "ablation_comparison.pdf"), bbox_inches="tight")
+    plt.savefig(
+        os.path.join(output_path, "ablation_comparison.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.savefig(
+        os.path.join(output_path, "ablation_comparison.pdf"), bbox_inches="tight"
+    )
     plt.close()
 
-    df = pd.DataFrame({
-        "Model": names,
-        "SAE": [str(ablation_results.get(k, {}).get("use_sae", "-")) for k in available],
-        "FGCA": [str(ablation_results.get(k, {}).get("use_fgca", "-")) for k in available],
-        "CFL": [str(ablation_results.get(k, {}).get("use_cfl", "-")) for k in available],
-        "ROUGE-1": rouge1_scores,
-        "ROUGE-2": rouge2_scores,
-        "ROUGE-L": rougeL_scores,
-        "Factuality": fact_scores,
-        "Hallucination": hall_scores,
-    })
+    df = pd.DataFrame(
+        {
+            "Model": names,
+            "HSE": [
+                str(ablation_results.get(k, {}).get("use_hse", "-"))
+                for k in available
+            ],
+            "CFA": [
+                str(ablation_results.get(k, {}).get("use_cfa", "-"))
+                for k in available
+            ],
+            "CPO": [
+                str(ablation_results.get(k, {}).get("use_cpo", "-"))
+                for k in available
+            ],
+            "ROUGE-1": rouge1_scores,
+            "ROUGE-2": rouge2_scores,
+            "ROUGE-L": rougeL_scores,
+            "Factuality": fact_scores,
+            "Hallucination": hall_scores,
+        }
+    )
     df.to_csv(os.path.join(output_path, "ablation_comparison.csv"), index=False)
     return df
 
@@ -251,34 +305,64 @@ def plot_context_length_impact(
             rougeL_scores.append(None)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(ctx_lengths, rouge1_scores, "o-", label="ROUGE-1", linewidth=2, markersize=8, color=COLORS[0])
-    ax.plot(ctx_lengths, rouge2_scores, "s-", label="ROUGE-2", linewidth=2, markersize=8, color=COLORS[1])
-    ax.plot(ctx_lengths, rougeL_scores, "^-", label="ROUGE-L", linewidth=2, markersize=8, color=COLORS[2])
+    ax.plot(
+        ctx_lengths, rouge1_scores, "o-", label="ROUGE-1",
+        linewidth=2, markersize=8, color=COLORS[0]
+    )
+    ax.plot(
+        ctx_lengths, rouge2_scores, "s-", label="ROUGE-2",
+        linewidth=2, markersize=8, color=COLORS[1]
+    )
+    ax.plot(
+        ctx_lengths, rougeL_scores, "^-", label="ROUGE-L",
+        linewidth=2, markersize=8, color=COLORS[2]
+    )
 
     ax.set_xlabel("Input Context Length (tokens)", fontsize=12)
     ax.set_ylabel("F1 Score", fontsize=12)
     display_name = MODEL_DISPLAY_NAMES.get(model_name, model_name)
-    ax.set_title(f"Impact of Context Length on Summarization Quality ({display_name})", fontsize=13, fontweight="bold")
+    ax.set_title(
+        f"Impact of Context Length on Summarization Quality ({display_name})",
+        fontsize=13,
+        fontweight="bold",
+    )
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
-    ax.set_xscale("log", base=2)
     ax.set_xticks(ctx_lengths)
     ax.set_xticklabels([str(x) for x in ctx_lengths])
 
-    for x, y1, y2, y3 in zip(ctx_lengths, rouge1_scores, rouge2_scores, rougeL_scores):
-        if y1 is not None:
-            ax.annotate(f"{y1:.3f}", (x, y1), textcoords="offset points", xytext=(0, 10), ha="center", fontsize=8)
+    for x, y in zip(ctx_lengths, rouge1_scores):
+        if y is not None:
+            ax.annotate(
+                f"{y:.3f}", (x, y),
+                textcoords="offset points", xytext=(0, 10),
+                ha="center", fontsize=8,
+            )
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, f"context_length_impact_{model_name}.png"), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(output_path, f"context_length_impact_{model_name}.pdf"), bbox_inches="tight")
+    plt.savefig(
+        os.path.join(output_path, f"context_length_impact_{model_name}.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.savefig(
+        os.path.join(output_path, f"context_length_impact_{model_name}.pdf"),
+        bbox_inches="tight",
+    )
     plt.close()
 
-    df = pd.DataFrame({
-        "Context Length": ctx_lengths, "ROUGE-1": rouge1_scores,
-        "ROUGE-2": rouge2_scores, "ROUGE-L": rougeL_scores,
-    })
-    df.to_csv(os.path.join(output_path, f"context_length_impact_{model_name}.csv"), index=False)
+    df = pd.DataFrame(
+        {
+            "Context Length": ctx_lengths,
+            "ROUGE-1": rouge1_scores,
+            "ROUGE-2": rouge2_scores,
+            "ROUGE-L": rougeL_scores,
+        }
+    )
+    df.to_csv(
+        os.path.join(output_path, f"context_length_impact_{model_name}.csv"),
+        index=False,
+    )
     return df
 
 
@@ -313,8 +397,14 @@ def plot_hallucination_comparison(
     if factuality_rates:
         x = range(len(models))
         width = 0.35
-        axes[0].bar([i - width / 2 for i in x], factuality_rates, width, label="Factuality", color=COLORS[1])
-        axes[0].bar([i + width / 2 for i in x], hallucination_rates, width, label="Hallucination", color=COLORS[3])
+        axes[0].bar(
+            [i - width / 2 for i in x], factuality_rates,
+            width, label="Factuality", color=COLORS[1],
+        )
+        axes[0].bar(
+            [i + width / 2 for i in x], hallucination_rates,
+            width, label="Hallucination", color=COLORS[3],
+        )
         axes[0].set_xticks(x)
         axes[0].set_xticklabels(display_names, rotation=45, ha="right", fontsize=10)
         axes[0].set_ylabel("Rate", fontsize=11)
@@ -324,9 +414,18 @@ def plot_hallucination_comparison(
     if intrinsic_rates:
         x = range(len(models))
         width = 0.25
-        axes[1].bar([i - width for i in x], intrinsic_rates, width, label="Intrinsic", color=COLORS[0])
-        axes[1].bar([i for i in x], extrinsic_rates, width, label="Extrinsic", color=COLORS[2])
-        axes[1].bar([i + width for i in x], contradiction_rates, width, label="Contradictory", color=COLORS[3])
+        axes[1].bar(
+            [i - width for i in x], intrinsic_rates,
+            width, label="Intrinsic", color=COLORS[0],
+        )
+        axes[1].bar(
+            [i for i in x], extrinsic_rates,
+            width, label="Extrinsic", color=COLORS[2],
+        )
+        axes[1].bar(
+            [i + width for i in x], contradiction_rates,
+            width, label="Contradictory", color=COLORS[3],
+        )
         axes[1].set_xticks(x)
         axes[1].set_xticklabels(display_names, rotation=45, ha="right", fontsize=10)
         axes[1].set_ylabel("Rate", fontsize=11)
@@ -334,15 +433,27 @@ def plot_hallucination_comparison(
         axes[1].legend(fontsize=10)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, "hallucination_comparison.png"), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(output_path, "hallucination_comparison.pdf"), bbox_inches="tight")
+    plt.savefig(
+        os.path.join(output_path, "hallucination_comparison.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.savefig(
+        os.path.join(output_path, "hallucination_comparison.pdf"),
+        bbox_inches="tight",
+    )
     plt.close()
 
-    df = pd.DataFrame({
-        "Model": display_names, "Factuality Rate": factuality_rates,
-        "Hallucination Rate": hallucination_rates, "Intrinsic Rate": intrinsic_rates,
-        "Extrinsic Rate": extrinsic_rates, "Contradictory Rate": contradiction_rates,
-    })
+    df = pd.DataFrame(
+        {
+            "Model": display_names,
+            "Factuality Rate": factuality_rates,
+            "Hallucination Rate": hallucination_rates,
+            "Intrinsic Rate": intrinsic_rates,
+            "Extrinsic Rate": extrinsic_rates,
+            "Contradictory Rate": contradiction_rates,
+        }
+    )
     df.to_csv(os.path.join(output_path, "hallucination_comparison.csv"), index=False)
     return df
 
@@ -360,18 +471,27 @@ def generate_latex_table(
         r2 = results["rouge"]["rouge2"]["fmeasure"]
         rL = results["rouge"]["rougeL"]["fmeasure"]
         ctx = results.get("max_input_length", "1024")
-        latex_rows.append(f"{display_name} & {ctx} & {r1:.4f} & {r2:.4f} & {rL:.4f} \\\\")
+        latex_rows.append(
+            f"{display_name} & {ctx} & {r1:.4f} & {r2:.4f} & {rL:.4f} \\\\"
+        )
 
-    latex_table = "\\begin{table}[htbp]\n\\centering\n\\caption{Summarization performance comparison}\n"
-    latex_table += "\\label{tab:rouge_results}\n\\begin{tabular}{lcccc}\n\\hline\n"
-    latex_table += "Model & Context Length & ROUGE-1 & ROUGE-2 & ROUGE-L \\\\\n\\hline\n"
-    latex_table += "\n".join(latex_rows) + "\n\\hline\n\\end{tabular}\n\\end{table}"
+    latex_table = (
+        "\\begin{table}[htbp]\n\\centering\n"
+        "\\caption{Summarization performance comparison}\n"
+        "\\label{tab:rouge_results}\n"
+        "\\begin{tabular}{lcccc}\n\\hline\n"
+        "Model & Context Length & ROUGE-1 & ROUGE-2 & ROUGE-L \\\\\n\\hline\n"
+        + "\n".join(latex_rows)
+        + "\n\\hline\n\\end{tabular}\n\\end{table}"
+    )
 
     with open(os.path.join(output_path, "results_table.tex"), "w", encoding="utf-8") as f:
         f.write(latex_table)
 
     return latex_table
 
+
+# ── CLI ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
@@ -382,9 +502,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     all_results = {}
-    for model_name in ["bart-large", "bart-large-cnn", "pegasus-arxiv", "led-base-16384", "led-fact-full"]:
-        for ctx in [1024, 8192]:
-            path = os.path.join(args.results_dir, f"{model_name}_arxiv_ctx{ctx}", "eval_results.json")
+    for model_name in [
+        "bart-large-cnn", "pegasus-cnn_dailymail", "pegasus-arxiv",
+        "distilbart-cnn-12-6", "bart-fact-full",
+    ]:
+        for ctx in [1024]:
+            path = os.path.join(
+                args.results_dir,
+                f"{model_name}_arxiv_ctx{ctx}",
+                "eval_results.json",
+            )
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     all_results[model_name] = json.load(f)

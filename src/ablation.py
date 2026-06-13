@@ -12,47 +12,51 @@ from transformers import Seq2SeqTrainingArguments
 
 from config import (
     ModelConfig, TrainingConfig, MODEL_CONFIGS, get_model_config, get_device,
-    get_led_fact_config,
+    get_bart_fact_config,
 )
 from data_utils import (
     load_arxiv_dataset, load_pubmed_dataset,
-    prepare_dataset_for_model, prepare_dataset_for_led_fact, set_seed,
+    prepare_dataset_for_model, prepare_dataset_for_bart_fact, set_seed,
 )
-from models.led_fact import LEDFaCTForConditionalGeneration, LEDFaCTConfig, ABLATION_CONFIGS
-from train import LEDFaCTTrainer, LEDFaCTDataCollator
+from models.bart_fact import BARTFaCTForConditionalGeneration, BARTFaCTConfig, ABLATION_CONFIGS
+from train import BARTFaCTTrainer, BARTFaCTDataCollator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
+# ── Ablation model definitions ─────────────────────────────────────────
+
 ABLATION_MODELS = {
-    "led_baseline": {
-        "config": ABLATION_CONFIGS["led_baseline"],
-        "model_name": "led-baseline",
-        "description": "LED baseline (no novel modules)",
+    "bart_baseline": {
+        "config": ABLATION_CONFIGS["bart_baseline"],
+        "model_name": "bart-baseline",
+        "description": "BART baseline (no novel modules) — pretrained bart-large-cnn",
     },
-    "led_fact_no_sae": {
-        "config": ABLATION_CONFIGS["led_fact_no_sae"],
-        "model_name": "led-fact-no-sae",
-        "description": "LED-FaCT w/o SAE (no section-aware embedding)",
+    "bart_fact_no_hse": {
+        "config": ABLATION_CONFIGS["bart_fact_no_hse"],
+        "model_name": "bart-fact-no-hse",
+        "description": "BART-FaCT w/o HSE: BART + CFA + CPO (no hierarchical structure encoding)",
     },
-    "led_fact_no_fgca": {
-        "config": ABLATION_CONFIGS["led_fact_no_fgca"],
-        "model_name": "led-fact-no-fgca",
-        "description": "LED-FaCT w/o FGCA (no faithfulness-gated cross-attention)",
+    "bart_fact_no_cfa": {
+        "config": ABLATION_CONFIGS["bart_fact_no_cfa"],
+        "model_name": "bart-fact-no-cfa",
+        "description": "BART-FaCT w/o CFA: BART + HSE + CPO (no calibrated faithfulness attention)",
     },
-    "led_fact_no_cfl": {
-        "config": ABLATION_CONFIGS["led_fact_no_cfl"],
-        "model_name": "led-fact-no-cfl",
-        "description": "LED-FaCT w/o CFL (no contrastive factuality loss)",
+    "bart_fact_no_cpo": {
+        "config": ABLATION_CONFIGS["bart_fact_no_cpo"],
+        "model_name": "bart-fact-no-cpo",
+        "description": "BART-FaCT w/o CPO: BART + HSE + CFA (no contrastive preference optimization)",
     },
-    "led_fact_full": {
-        "config": ABLATION_CONFIGS["led_fact_full"],
-        "model_name": "led-fact-full",
-        "description": "LED-FaCT (Full): LED + SAE + FGCA + CFL",
+    "bart_fact_full": {
+        "config": ABLATION_CONFIGS["bart_fact_full"],
+        "model_name": "bart-fact-full",
+        "description": "BART-FaCT (Full): BART + HSE + CFA + CPO",
     },
 }
 
+
+# ── Single ablation run ────────────────────────────────────────────────
 
 def run_single_ablation(
     ablation_name: str,
@@ -62,18 +66,25 @@ def run_single_ablation(
     output_dir: str = "./results/ablation",
     epochs: int = 3,
     learning_rate: float = 3e-5,
-    batch_size: int = 2,
+    batch_size: int = 4,
 ):
     if ablation_name not in ABLATION_MODELS:
-        raise ValueError(f"Unknown ablation: {ablation_name}. Available: {list(ABLATION_MODELS.keys())}")
+        raise ValueError(
+            f"Unknown ablation: {ablation_name}. "
+            f"Available: {list(ABLATION_MODELS.keys())}"
+        )
 
     ablation_info = ABLATION_MODELS[ablation_name]
-    led_fact_config = ablation_info["config"]
+    bart_fact_config = ablation_info["config"]
 
     logger.info(f"\n{'='*60}")
     logger.info(f"Ablation Study: {ablation_name}")
     logger.info(f"  Description: {ablation_info['description']}")
-    logger.info(f"  SAE: {led_fact_config.use_sae}, FGCA: {led_fact_config.use_fgca}, CFL: {led_fact_config.use_cfl}")
+    logger.info(
+        f"  HSE: {bart_fact_config.use_hse}, "
+        f"CFA: {bart_fact_config.use_cfa}, "
+        f"CPO: {bart_fact_config.use_cpo}"
+    )
     logger.info(f"{'='*60}")
 
     set_seed(42)
@@ -82,22 +93,26 @@ def run_single_ablation(
     ablation_dir = os.path.join(output_dir, ablation_name)
     os.makedirs(ablation_dir, exist_ok=True)
 
-    config_copy = LEDFaCTConfig(
-        use_sae=led_fact_config.use_sae,
-        use_fgca=led_fact_config.use_fgca,
-        use_cfl=led_fact_config.use_cfl,
-        section_embed_dim=led_fact_config.section_embed_dim,
-        fgca_hidden_dim=led_fact_config.fgca_hidden_dim,
-        cfl_projection_dim=led_fact_config.cfl_projection_dim,
-        cfl_temperature=led_fact_config.cfl_temperature,
-        cfl_alpha=led_fact_config.cfl_alpha,
-        dropout=led_fact_config.dropout,
-        base_model_name=led_fact_config.base_model_name,
-        max_input_length=led_fact_config.max_input_length,
-        max_target_length=led_fact_config.max_target_length,
+    config_copy = BARTFaCTConfig(
+        use_hse=bart_fact_config.use_hse,
+        use_cfa=bart_fact_config.use_cfa,
+        use_cpo=bart_fact_config.use_cpo,
+        hse_num_heads=bart_fact_config.hse_num_heads,
+        hse_ffn_dim=bart_fact_config.hse_ffn_dim,
+        hse_dropout=bart_fact_config.hse_dropout,
+        cfa_bottleneck_dim=bart_fact_config.cfa_bottleneck_dim,
+        cfa_dropout=bart_fact_config.cfa_dropout,
+        cpo_projection_dim=bart_fact_config.cpo_projection_dim,
+        cpo_temperature=bart_fact_config.cpo_temperature,
+        cpo_beta=bart_fact_config.cpo_beta,
+        cpo_alpha=bart_fact_config.cpo_alpha,
+        dropout=bart_fact_config.dropout,
+        base_model_name=bart_fact_config.base_model_name,
+        max_input_length=bart_fact_config.max_input_length,
+        max_target_length=bart_fact_config.max_target_length,
     )
 
-    model = LEDFaCTForConditionalGeneration(config_copy)
+    model = BARTFaCTForConditionalGeneration(config_copy)
     model = model.to(device)
 
     param_info = model.get_trainable_params_summary()
@@ -108,7 +123,7 @@ def run_single_ablation(
 
     tokenizer = model.tokenizer
 
-    dataset = prepare_dataset_for_led_fact(
+    dataset = prepare_dataset_for_bart_fact(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
         max_input_length=config_copy.max_input_length,
@@ -116,28 +131,28 @@ def run_single_ablation(
         max_samples=max_samples,
     )
 
-    data_collator = LEDFaCTDataCollator(
+    data_collator = BARTFaCTDataCollator(
         tokenizer=tokenizer,
-        model=model.led,
+        model=model.bart,
         padding=True,
     )
 
-    use_cfl = config_copy.use_cfl
-    cfl_alpha = config_copy.cfl_alpha
+    use_cpo = config_copy.use_cpo
+    cpo_alpha = config_copy.cpo_alpha
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=os.path.join(ablation_dir, "checkpoints"),
         learning_rate=learning_rate,
         per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=4,
+        per_device_eval_batch_size=8,
+        gradient_accumulation_steps=2,
         num_train_epochs=epochs,
-        warmup_steps=500,
+        warmup_steps=200,
         weight_decay=0.01,
         fp16=device.type == "cuda",
-        gradient_checkpointing=True,
-        logging_steps=100,
-        eval_strategy="no",
+        gradient_checkpointing=False,
+        logging_steps=50,
+        evaluation_strategy="no",
         save_steps=500,
         save_total_limit=2,
         predict_with_generate=True,
@@ -145,20 +160,20 @@ def run_single_ablation(
         report_to=[],
         seed=42,
         remove_unused_columns=False,
-        dataloader_num_workers=0 if device.type == "cpu" else 4,
+        dataloader_num_workers=0 if device.type == "cpu" else 2,
         dataloader_pin_memory=device.type == "cuda",
     )
 
-    trainer = LEDFaCTTrainer(
+    trainer = BARTFaCTTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation", None),
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         data_collator=data_collator,
-        led_fact_model=model,
-        use_cfl=use_cfl,
-        cfl_alpha=cfl_alpha,
+        bart_fact_model=model,
+        use_cpo=use_cpo,
+        cpo_alpha=cpo_alpha,
     )
 
     logger.info(f"Starting training for ablation: {ablation_name}")
@@ -191,9 +206,9 @@ def run_single_ablation(
 
     hallucination_results = evaluate_hallucination_for_model(
         model_name=ablation_name,
-        source_texts=source_texts[:len(summaries)],
+        source_texts=source_texts[: len(summaries)],
         generated_summaries=summaries,
-        references=references[:len(summaries)],
+        references=references[: len(summaries)],
         use_nli=True,
         output_dir=os.path.join(ablation_dir, "hallucination"),
     )
@@ -201,9 +216,9 @@ def run_single_ablation(
     ablation_result = {
         "ablation_name": ablation_name,
         "description": ablation_info["description"],
-        "use_sae": config_copy.use_sae,
-        "use_fgca": config_copy.use_fgca,
-        "use_cfl": config_copy.use_cfl,
+        "use_hse": config_copy.use_hse,
+        "use_cfa": config_copy.use_cfa,
+        "use_cpo": config_copy.use_cpo,
         "model_params": param_info,
         "eval_results": eval_results,
         "hallucination_results": hallucination_results,
@@ -217,6 +232,8 @@ def run_single_ablation(
     return ablation_result
 
 
+# ── Run all ablations ──────────────────────────────────────────────────
+
 def run_all_ablations(
     dataset_name: str = "arxiv",
     max_samples: int = 1000,
@@ -224,7 +241,7 @@ def run_all_ablations(
     output_dir: str = "./results/ablation",
     epochs: int = 3,
     learning_rate: float = 3e-5,
-    batch_size: int = 2,
+    batch_size: int = 4,
     ablation_list: List[str] = None,
 ):
     if ablation_list is None:
@@ -262,13 +279,14 @@ def run_all_ablations(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    # Build comparison summary
     compare_results = {}
     for name, result in all_results.items():
         if isinstance(result, dict) and "error" not in result:
             entry = {
-                "use_sae": result.get("use_sae", False),
-                "use_fgca": result.get("use_fgca", False),
-                "use_cfl": result.get("use_cfl", False),
+                "use_hse": result.get("use_hse", False),
+                "use_cfa": result.get("use_cfa", False),
+                "use_cpo": result.get("use_cpo", False),
             }
             if "eval_results" in result and isinstance(result["eval_results"], dict):
                 if "rouge" in result["eval_results"]:
@@ -276,7 +294,9 @@ def run_all_ablations(
                     entry["rouge1"] = rouge.get("rouge1", {}).get("fmeasure", 0)
                     entry["rouge2"] = rouge.get("rouge2", {}).get("fmeasure", 0)
                     entry["rougeL"] = rouge.get("rougeL", {}).get("fmeasure", 0)
-            if "hallucination_results" in result and isinstance(result["hallucination_results"], dict):
+            if "hallucination_results" in result and isinstance(
+                result["hallucination_results"], dict
+            ):
                 nli = result["hallucination_results"].get("nli_metrics", {})
                 entry["factuality_rate"] = nli.get("factuality_rate", 0)
                 entry["hallucination_rate"] = nli.get("hallucination_rate", 0)
@@ -288,32 +308,43 @@ def run_all_ablations(
 
     logger.info(f"\nAblation comparison saved to {summary_path}")
     logger.info("\nAblation Results Summary:")
-    logger.info(f"{'Model':<25} {'SAE':>5} {'FGCA':>5} {'CFL':>5} {'R1':>8} {'R2':>8} {'RL':>8} {'Fact':>8} {'Hall':>8}")
+    logger.info(
+        f"{'Model':<25} {'HSE':>5} {'CFA':>5} {'CPO':>5} "
+        f"{'R1':>8} {'R2':>8} {'RL':>8} {'Fact':>8} {'Hall':>8}"
+    )
     logger.info("-" * 90)
     for name, entry in compare_results.items():
         logger.info(
-            f"{name:<25} {str(entry.get('use_sae', '-')):>5} {str(entry.get('use_fgca', '-')):>5} "
-            f"{str(entry.get('use_cfl', '-')):>5} {entry.get('rouge1', 0):>8.4f} "
-            f"{entry.get('rouge2', 0):>8.4f} {entry.get('rougeL', 0):>8.4f} "
-            f"{entry.get('factuality_rate', 0):>8.4f} {entry.get('hallucination_rate', 0):>8.4f}"
+            f"{name:<25} {str(entry.get('use_hse', '-')):>5} "
+            f"{str(entry.get('use_cfa', '-')):>5} "
+            f"{str(entry.get('use_cpo', '-')):>5} "
+            f"{entry.get('rouge1', 0):>8.4f} "
+            f"{entry.get('rouge2', 0):>8.4f} "
+            f"{entry.get('rougeL', 0):>8.4f} "
+            f"{entry.get('factuality_rate', 0):>8.4f} "
+            f"{entry.get('hallucination_rate', 0):>8.4f}"
         )
 
     return all_results
 
 
+# ── CLI ────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run ablation experiments (module ablation)")
-    parser.add_argument("--ablation", type=str, default="all",
-                        choices=list(ABLATION_MODELS.keys()) + ["all"],
-                        help="Which ablation to run")
+    parser.add_argument(
+        "--ablation", type=str, default="all",
+        choices=list(ABLATION_MODELS.keys()) + ["all"],
+        help="Which ablation to run",
+    )
     parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
     parser.add_argument("--max_samples", type=int, default=1000)
     parser.add_argument("--num_test", type=int, default=100)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-5)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default="./results/ablation")
 
     args = parser.parse_args()

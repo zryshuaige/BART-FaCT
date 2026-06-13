@@ -7,20 +7,25 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from rouge_score import rouge_scorer
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, LEDForConditionalGeneration
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-from config import ModelConfig, MODEL_CONFIGS, get_model_config, get_device, get_led_fact_config
+from config import ModelConfig, MODEL_CONFIGS, get_model_config, get_device, get_bart_fact_config
 from data_utils import load_arxiv_dataset, load_pubmed_dataset, set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
+# ── ROUGE ──────────────────────────────────────────────────────────────
+
 def compute_rouge(predictions: List[str], references: List[str]) -> Dict[str, Dict[str, float]]:
-    rouge_scorer_instance = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL", "rougeLsum"], use_stemmer=True)
+    scorer = rouge_scorer.RougeScorer(
+        ["rouge1", "rouge2", "rougeL", "rougeLsum"], use_stemmer=True
+    )
     scores_p = {"rouge1": [], "rouge2": [], "rougeL": [], "rougeLsum": []}
     scores_r = {"rouge1": [], "rouge2": [], "rougeL": [], "rougeLsum": []}
     scores_f = {"rouge1": [], "rouge2": [], "rougeL": [], "rougeLsum": []}
+
     for pred, ref in zip(predictions, references):
         if not pred.strip():
             for key in scores_p:
@@ -28,19 +33,11 @@ def compute_rouge(predictions: List[str], references: List[str]) -> Dict[str, Di
                 scores_r[key].append(0.0)
                 scores_f[key].append(0.0)
             continue
-        score = rouge_scorer_instance.score(ref, pred)
-        scores_p["rouge1"].append(score["rouge1"].precision)
-        scores_p["rouge2"].append(score["rouge2"].precision)
-        scores_p["rougeL"].append(score["rougeL"].precision)
-        scores_p["rougeLsum"].append(score["rougeLsum"].precision)
-        scores_r["rouge1"].append(score["rouge1"].recall)
-        scores_r["rouge2"].append(score["rouge2"].recall)
-        scores_r["rougeL"].append(score["rougeL"].recall)
-        scores_r["rougeLsum"].append(score["rougeLsum"].recall)
-        scores_f["rouge1"].append(score["rouge1"].fmeasure)
-        scores_f["rouge2"].append(score["rouge2"].fmeasure)
-        scores_f["rougeL"].append(score["rougeL"].fmeasure)
-        scores_f["rougeLsum"].append(score["rougeLsum"].fmeasure)
+        score = scorer.score(ref, pred)
+        for k in scores_p:
+            scores_p[k].append(score[k].precision)
+            scores_r[k].append(score[k].recall)
+            scores_f[k].append(score[k].fmeasure)
 
     return {
         k: {
@@ -63,6 +60,8 @@ def compute_length_stats(texts: List[str]) -> Dict[str, float]:
     }
 
 
+# ── Generation ─────────────────────────────────────────────────────────
+
 def generate_summaries(
     model,
     tokenizer,
@@ -72,9 +71,9 @@ def generate_summaries(
     beam_size: int = 4,
     length_penalty: float = 2.0,
     no_repeat_ngram_size: int = 3,
-    batch_size: int = 4,
+    batch_size: int = 8,
     device=None,
-    is_led_fact: bool = False,
+    is_bart_fact: bool = False,
 ):
     if device is None:
         device = get_device()
@@ -100,24 +99,17 @@ def generate_summaries(
             "early_stopping": True,
         }
 
-        is_led_model = hasattr(model.config, "is_led") or (
-            hasattr(model, "config") and "led" in str(type(model)).lower()
-        )
-        if is_led_model and not is_led_fact:
-            gen_kwargs["use_cache"] = False
-
         with torch.no_grad():
-            if is_led_fact:
-                from models.section_embedding import SectionDetector
-                section_detector = SectionDetector()
-                section_ids = section_detector.batch_text_to_section_ids(
+            if is_bart_fact:
+                from models.hierarchical_structure import batch_detect_boundaries
+                boundary_mask = batch_detect_boundaries(
                     batch, tokenizer, max_input_length
                 ).to(device)
 
                 outputs = model.generate(
                     input_ids=inputs["input_ids"],
                     attention_mask=inputs.get("attention_mask"),
-                    section_ids=section_ids,
+                    boundary_mask=boundary_mask,
                     input_texts=batch,
                     **gen_kwargs,
                 )
@@ -130,6 +122,29 @@ def generate_summaries(
     return all_summaries
 
 
+# ── Model loading ──────────────────────────────────────────────────────
+
+def load_model_and_tokenizer(model_config_or_name, device=None, checkpoint_dir=None):
+    if isinstance(model_config_or_name, str):
+        model_config = get_model_config(model_config_or_name)
+    else:
+        model_config = model_config_or_name
+
+    if device is None:
+        device = get_device()
+
+    model_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
+    tokenizer_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+    model = model.to(device)
+    model.eval()
+    return model, tokenizer
+
+
+# ── Main evaluation ────────────────────────────────────────────────────
+
 def evaluate_model(
     model_name: str,
     dataset_name: str = "arxiv",
@@ -138,7 +153,7 @@ def evaluate_model(
     max_input_length: int = None,
     beam_size: int = 4,
     length_penalty: float = 2.0,
-    batch_size: int = 4,
+    batch_size: int = 8,
     output_dir: str = "./results",
     device=None,
     trained_model=None,
@@ -156,41 +171,45 @@ def evaluate_model(
 
     logger.info(f"Evaluating {model_name} on {dataset_name} (ctx={max_input_length})")
 
-    is_led_fact = model_config.is_led_fact
+    is_bart_fact = model_config.is_bart_fact
 
     checkpoint_dir = os.path.join(
         output_dir,
         f"{model_name}_{dataset_name}_ctx{max_input_length}",
     )
 
+    # Load or reuse model
     if trained_model is not None and trained_tokenizer is not None:
         model = trained_model
         tokenizer = trained_tokenizer
         model.eval()
-    elif is_led_fact:
-        from models.led_fact import LEDFaCTForConditionalGeneration
-        led_fact_config = get_led_fact_config(model_name)
-        led_fact_config.max_input_length = max_input_length
-        led_fact_config.max_target_length = model_config.max_target_length
+    elif is_bart_fact:
+        from models.bart_fact import BARTFaCTForConditionalGeneration
+        bart_fact_config = get_bart_fact_config(model_name)
+        bart_fact_config.max_input_length = max_input_length
+        bart_fact_config.max_target_length = model_config.max_target_length
 
-        if os.path.exists(os.path.join(checkpoint_dir, "led_fact_config.json")):
-            logger.info(f"Loading trained LED-FaCT model from {checkpoint_dir}")
-            model = LEDFaCTForConditionalGeneration.from_pretrained(checkpoint_dir)
+        if os.path.exists(os.path.join(checkpoint_dir, "bart_fact_config.json")):
+            logger.info(f"Loading trained BART-FaCT model from {checkpoint_dir}")
+            model = BARTFaCTForConditionalGeneration.from_pretrained(checkpoint_dir)
             model = model.to(device)
             tokenizer = model.tokenizer
         else:
             logger.warning(f"No checkpoint found at {checkpoint_dir}, using untrained model")
-            model = LEDFaCTForConditionalGeneration(led_fact_config)
+            model = BARTFaCTForConditionalGeneration(bart_fact_config)
             model = model.to(device)
             tokenizer = model.tokenizer
     else:
         if os.path.exists(os.path.join(checkpoint_dir, "config.json")):
             logger.info(f"Loading trained model from {checkpoint_dir}")
-            model, tokenizer = load_model_and_tokenizer(model_config, device, checkpoint_dir=checkpoint_dir)
+            model, tokenizer = load_model_and_tokenizer(
+                model_config, device, checkpoint_dir=checkpoint_dir
+            )
         else:
             logger.warning(f"No checkpoint found at {checkpoint_dir}, using pretrained model")
             model, tokenizer = load_model_and_tokenizer(model_config, device)
 
+    # Load dataset
     if dataset_name == "arxiv":
         ds = load_arxiv_dataset(max_samples=None)
     elif dataset_name == "pubmed":
@@ -209,6 +228,7 @@ def evaluate_model(
     texts = [sample[input_field] for sample in test_data]
     references = [sample[target_field] for sample in test_data]
 
+    # Generate
     summaries = generate_summaries(
         model=model,
         tokenizer=tokenizer,
@@ -219,9 +239,10 @@ def evaluate_model(
         length_penalty=length_penalty,
         batch_size=batch_size,
         device=device,
-        is_led_fact=is_led_fact,
+        is_bart_fact=is_bart_fact,
     )
 
+    # Evaluate
     rouge_scores = compute_rouge(summaries, references)
     pred_length_stats = compute_length_stats(summaries)
     ref_length_stats = compute_length_stats(references)
@@ -239,14 +260,17 @@ def evaluate_model(
         "num_test_samples": len(texts),
         "beam_size": beam_size,
         "length_penalty": length_penalty,
-        "is_led_fact": is_led_fact,
+        "is_bart_fact": is_bart_fact,
         "rouge": rouge_scores,
         "benchmark": bench_results,
         "pred_length_stats": pred_length_stats,
         "ref_length_stats": ref_length_stats,
     }
 
-    result_dir = os.path.join(output_dir, f"{model_name}_{dataset_name}_ctx{max_input_length}")
+    # Save
+    result_dir = os.path.join(
+        output_dir, f"{model_name}_{dataset_name}_ctx{max_input_length}"
+    )
     os.makedirs(result_dir, exist_ok=True)
 
     with open(os.path.join(result_dir, "eval_results.json"), "w", encoding="utf-8") as f:
@@ -254,58 +278,29 @@ def evaluate_model(
 
     with open(os.path.join(result_dir, "predictions.json"), "w", encoding="utf-8") as f:
         json.dump(
-            [{"input": texts[i][:500] + "...", "reference": references[i], "prediction": summaries[i]}
-             for i in range(min(50, len(texts)))],
-            f, indent=2, ensure_ascii=False,
+            [
+                {
+                    "input": texts[i][:500] + "...",
+                    "reference": references[i],
+                    "prediction": summaries[i],
+                }
+                for i in range(min(50, len(texts)))
+            ],
+            f,
+            indent=2,
+            ensure_ascii=False,
         )
 
-    logger.info(f"Results: ROUGE-1={rouge_scores['rouge1']['fmeasure']:.4f}, "
-                f"ROUGE-2={rouge_scores['rouge2']['fmeasure']:.4f}, "
-                f"ROUGE-L={rouge_scores['rougeL']['fmeasure']:.4f}")
+    logger.info(
+        f"Results: ROUGE-1={rouge_scores['rouge1']['fmeasure']:.4f}, "
+        f"ROUGE-2={rouge_scores['rouge2']['fmeasure']:.4f}, "
+        f"ROUGE-L={rouge_scores['rougeL']['fmeasure']:.4f}"
+    )
 
     return results, summaries, references
 
 
-def load_model_and_tokenizer(model_config_or_name, device=None, checkpoint_dir=None):
-    if isinstance(model_config_or_name, str):
-        model_config = get_model_config(model_config_or_name)
-    else:
-        model_config = model_config_or_name
-
-    if device is None:
-        device = get_device()
-
-    model_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
-    tokenizer_path = checkpoint_dir if checkpoint_dir else model_config.hf_path
-
-    if checkpoint_dir:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_config.hf_path)
-
-    if model_config.is_led:
-        model = LEDForConditionalGeneration.from_pretrained(
-            model_path,
-        )
-        model.generation_config.max_length = model_config.max_target_length
-        n_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 12
-        attn_window = min(1024, model_config.max_input_length // 2)
-        model.config.attention_window = [attn_window] * n_layers
-        model.config.attention_mode = "sliding_chunks"
-        if hasattr(model.config, 'max_source_positions'):
-            model.config.max_source_positions = model_config.max_input_length
-        else:
-            model.config.encoder.max_source_positions = model_config.max_input_length
-        tokenizer.model_max_length = model_config.max_input_length
-    else:
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_path,
-        )
-
-    model = model.to(device)
-    model.eval()
-    return model, tokenizer
-
+# ── Context length sweep ───────────────────────────────────────────────
 
 def evaluate_context_length_impact(
     model_name: str,
@@ -335,12 +330,16 @@ def evaluate_context_length_impact(
             logger.error(f"Failed at context length {ctx_len}: {e}")
             all_results[ctx_len] = {"error": str(e)}
 
-    summary_path = os.path.join(output_dir, f"context_length_impact_{model_name}_{dataset_name}.json")
+    summary_path = os.path.join(
+        output_dir, f"context_length_impact_{model_name}_{dataset_name}.json"
+    )
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     return all_results
 
+
+# ── CLI ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
@@ -351,7 +350,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_input_length", type=int, default=None)
     parser.add_argument("--num_test_samples", type=int, default=100)
     parser.add_argument("--beam_size", type=int, default=4)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--output_dir", type=str, default="./results")
     parser.add_argument("--context_lengths", type=str, default=None)
 

@@ -15,46 +15,63 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     DataCollatorForSeq2Seq,
-    LEDForConditionalGeneration,
+    BartForConditionalGeneration,
 )
 
 from config import (
-    ModelConfig, TrainingConfig, MODEL_CONFIGS, get_model_config, get_device,
-    get_led_fact_config,
+    ModelConfig,
+    TrainingConfig,
+    MODEL_CONFIGS,
+    get_model_config,
+    get_device,
+    get_bart_fact_config,
 )
 from data_utils import (
-    load_arxiv_dataset, load_pubmed_dataset,
-    prepare_dataset_for_model, prepare_dataset_for_led_fact, set_seed,
+    load_arxiv_dataset,
+    load_pubmed_dataset,
+    prepare_dataset_for_model,
+    prepare_dataset_for_bart_fact,
+    set_seed,
 )
-from models.led_fact import LEDFaCTForConditionalGeneration, LEDFaCTConfig
+from models.bart_fact import BARTFaCTForConditionalGeneration, BARTFaCTConfig
+from models.preference_loss import generate_context_free_summary
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
-class LEDFaCTDataCollator(DataCollatorForSeq2Seq):
+# ═══════════════════════════════════════════════════════════════════════
+# Data collator for BART-FaCT
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class BARTFaCTDataCollator(DataCollatorForSeq2Seq):
+    """Extends Seq2Seq collator to handle boundary_mask and input_texts."""
+
     def __call__(self, features, return_tensors=None):
         input_texts_list = None
-        section_ids_list = None
+        boundary_mask_list = None
 
         if features and "input_texts" in features[0]:
             input_texts_list = [f.pop("input_texts") for f in features]
 
-        if features and "section_ids" in features[0]:
-            section_ids_list = [f.pop("section_ids") for f in features]
+        if features and "boundary_mask" in features[0]:
+            boundary_mask_list = [f.pop("boundary_mask") for f in features]
 
         batch = super().__call__(features, return_tensors=return_tensors)
 
-        if section_ids_list is not None:
-            max_len = max(len(s) for s in section_ids_list)
+        if boundary_mask_list is not None:
+            max_len = max(len(m) for m in boundary_mask_list)
             pad_val = 0
             padded = []
-            for s in section_ids_list:
-                if len(s) < max_len:
-                    padded.append(s + [pad_val] * (max_len - len(s)))
+            for m in boundary_mask_list:
+                if len(m) < max_len:
+                    padded.append(m + [pad_val] * (max_len - len(m)))
                 else:
-                    padded.append(s[:max_len])
-            batch["section_ids"] = torch.tensor(padded, dtype=torch.long)
+                    padded.append(m[:max_len])
+            batch["boundary_mask"] = torch.tensor(padded, dtype=torch.long)
 
         if input_texts_list is not None:
             batch["input_texts"] = input_texts_list
@@ -62,37 +79,53 @@ class LEDFaCTDataCollator(DataCollatorForSeq2Seq):
         return batch
 
 
-class LEDFaCTTrainer(Seq2SeqTrainer):
-    def __init__(self, *args, led_fact_model=None, use_cfl=False, cfl_alpha=0.1, **kwargs):
+# ═══════════════════════════════════════════════════════════════════════
+# Custom trainer with CPO support
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class BARTFaCTTrainer(Seq2SeqTrainer):
+    """Trainer that supports the Contrastive Preference Optimization (CPO) loss."""
+
+    def __init__(
+        self,
+        *args,
+        bart_fact_model=None,
+        use_cpo=False,
+        cpo_alpha=0.15,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
-        self.led_fact_model = led_fact_model
-        self.use_cfl = use_cfl
-        self.cfl_alpha = cfl_alpha
+        self.bart_fact_model = bart_fact_model
+        self.use_cpo = use_cpo
+        self.cpo_alpha = cpo_alpha
 
     def save_model(self, output_dir=None, _internal_call=False):
-        if self.led_fact_model is not None:
-            import os
+        if self.bart_fact_model is not None:
             output_dir = output_dir if output_dir is not None else self.args.output_dir
             os.makedirs(output_dir, exist_ok=True)
-            self.led_fact_model.save_pretrained(output_dir)
-            self.led_fact_model.tokenizer.save_pretrained(output_dir)
+            self.bart_fact_model.save_pretrained(output_dir)
+            self.bart_fact_model.tokenizer.save_pretrained(output_dir)
         else:
             super().save_model(output_dir=output_dir, _internal_call=_internal_call)
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
-        is_led_fact = self.led_fact_model is not None
+    def compute_loss(
+        self, model, inputs, return_outputs=False, **kwargs
+    ):
+        is_bart_fact = self.bart_fact_model is not None
 
-        if is_led_fact:
-            section_ids = inputs.pop("section_ids", None)
+        if is_bart_fact:
+            boundary_mask = inputs.pop("boundary_mask", None)
             input_texts = inputs.pop("input_texts", None)
             labels = inputs.get("labels")
 
-            outputs = self.led_fact_model(
+            # Forward pass with HSE
+            outputs = self.bart_fact_model(
                 input_ids=inputs.get("input_ids"),
                 attention_mask=inputs.get("attention_mask"),
                 decoder_input_ids=inputs.get("decoder_input_ids"),
                 labels=labels,
-                section_ids=section_ids,
+                boundary_mask=boundary_mask,
                 input_texts=input_texts,
                 output_hidden_states=True,
                 return_dict=True,
@@ -100,120 +133,152 @@ class LEDFaCTTrainer(Seq2SeqTrainer):
 
             ce_loss = outputs.loss
 
-            if self.use_cfl and labels is not None:
-                decoder_hidden = outputs.decoder_hidden_states[-1] if outputs.decoder_hidden_states else None
+            # ── CPO: Contrastive Preference Optimization ──
+            if self.use_cpo and labels is not None:
+                decoder_hidden = (
+                    outputs.decoder_hidden_states[-1]
+                    if outputs.decoder_hidden_states
+                    else None
+                )
                 if decoder_hidden is not None:
-                    perturbator = self.led_fact_model.cfl_loss.perturbator
-                    tokenizer = self.led_fact_model.tokenizer
-                    valid_mask = labels != -100
-                    if valid_mask.any():
-                        valid_labels = labels.clone()
-                        valid_labels[valid_labels == -100] = tokenizer.pad_token_id
+                    tokenizer = self.bart_fact_model.tokenizer
 
-                        decoded_texts = tokenizer.batch_decode(valid_labels, skip_special_tokens=True)
-                        perturbed_texts = perturbator.perturb_batch(decoded_texts, strategy="mixed")
-                        perturbed_labels = tokenizer(
-                            perturbed_texts,
-                            max_length=valid_labels.shape[1],
-                            truncation=True,
-                            padding="max_length",
-                            return_tensors="pt",
-                        )["input_ids"].to(labels.device)
+                    # Generate context-free summaries as "dispreferred" responses
+                    with torch.no_grad():
+                        neg_ids = generate_context_free_summary(
+                            model=self.bart_fact_model,
+                            tokenizer=tokenizer,
+                            num_tokens=min(128, labels.shape[1]),
+                        )
+                        # Expand single negative to match batch size
+                        B = labels.shape[0]
+                        if neg_ids.shape[0] == 1 and B > 1:
+                            neg_ids = neg_ids.repeat(B, 1)
 
-                        perturbed_decoder_input_ids = self.led_fact_model.led.prepare_decoder_input_ids_from_labels(perturbed_labels)
-
-                        with torch.no_grad():
-                            neg_outputs = self.led_fact_model(
-                                input_ids=inputs.get("input_ids"),
-                                attention_mask=inputs.get("attention_mask"),
-                                decoder_input_ids=perturbed_decoder_input_ids,
-                                section_ids=section_ids,
-                                input_texts=input_texts,
-                                output_hidden_states=True,
-                                return_dict=True,
+                        # Pad to match label length
+                        if neg_ids.shape[1] < labels.shape[1]:
+                            pad_len = labels.shape[1] - neg_ids.shape[1]
+                            neg_ids = torch.nn.functional.pad(
+                                neg_ids, (0, pad_len),
+                                value=tokenizer.pad_token_id or 0,
                             )
-                        neg_decoder_hidden = neg_outputs.decoder_hidden_states[-1].detach() if neg_outputs.decoder_hidden_states else decoder_hidden.detach()
-                        del neg_outputs, perturbed_decoder_input_ids, perturbed_labels
-                        gc.collect()
-                        torch.cuda.empty_cache()
+                        else:
+                            neg_ids = neg_ids[:, :labels.shape[1]]
 
-                        cfl_loss, cfl_metrics = self.led_fact_model.cfl_loss(
-                            decoder_hidden_states=decoder_hidden,
-                            labels=labels,
-                            neg_decoder_hidden_states=neg_decoder_hidden,
+                        neg_ids = neg_ids.to(labels.device)
+
+                        # Get decoder hidden states for the negative (context-free) summary
+                        neg_decoder_input_ids = (
+                            self.bart_fact_model.bart.prepare_decoder_input_ids_from_labels(
+                                neg_ids
+                            )
                         )
 
-                        total_loss = ce_loss + self.cfl_alpha * cfl_loss
-
-                        del neg_decoder_hidden
-                        gc.collect()
+                        neg_outputs = self.bart_fact_model(
+                            input_ids=inputs.get("input_ids"),
+                            attention_mask=inputs.get("attention_mask"),
+                            decoder_input_ids=neg_decoder_input_ids,
+                            boundary_mask=boundary_mask,
+                            input_texts=input_texts,
+                            output_hidden_states=True,
+                            return_dict=True,
+                        )
+                    neg_hidden = (
+                        neg_outputs.decoder_hidden_states[-1].detach()
+                        if neg_outputs.decoder_hidden_states
+                        else decoder_hidden.detach()
+                    )
+                    del neg_outputs, neg_decoder_input_ids, neg_ids
+                    gc.collect()
+                    if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
-                        self.log({
-                            "ce_loss": ce_loss.item(),
-                            "cfl_loss": cfl_loss.item(),
-                            "total_loss": total_loss.item(),
-                        })
+                    # Compute CPO loss
+                    cpo_loss_val, cpo_metrics = self.bart_fact_model.cpo_loss(
+                        pos_hidden_states=decoder_hidden,
+                        neg_hidden_states=neg_hidden,
+                    )
 
-                        return (total_loss, outputs) if return_outputs else total_loss
+                    total_loss = ce_loss + self.cpo_alpha * cpo_loss_val
+
+                    del neg_hidden
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    self.log(
+                        {
+                            "ce_loss": ce_loss.item(),
+                            "cpo_loss": cpo_loss_val.item(),
+                            "total_loss": total_loss.item(),
+                            "cpo_margin": cpo_metrics.get("preference_margin", 0),
+                            "cpo_accuracy": cpo_metrics.get("preference_accuracy", 0),
+                        }
+                    )
+
+                    return (total_loss, outputs) if return_outputs else total_loss
 
             return (ce_loss, outputs) if return_outputs else ce_loss
 
-        inputs.pop("section_ids", None)
+        # Standard model path
+        inputs.pop("boundary_mask", None)
         inputs.pop("input_texts", None)
-        return super().compute_loss(model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch, **kwargs)
+        return super().compute_loss(
+            model,
+            inputs,
+            return_outputs=return_outputs,
+            **kwargs,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Model loading
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def load_model_and_tokenizer(model_config: ModelConfig, device=None):
+    """Load a standard HuggingFace seq2seq model."""
     if device is None:
         device = get_device()
 
     logger.info(f"Loading model: {model_config.name} from {model_config.hf_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_config.hf_path)
-
-    if model_config.is_led:
-        model = LEDForConditionalGeneration.from_pretrained(
-            model_config.hf_path,
-        )
-        tokenizer.model_max_length = model_config.max_input_length
-
-        if model_config.max_input_length > 1024:
-            n_layers = model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else 12
-            model.config.attention_window = [
-                min(1024, model_config.max_input_length // 2)
-            ] * n_layers
-
-        model.generation_config.max_length = model_config.max_target_length
-        model.config.eos_token_id = tokenizer.eos_token_id
-        model.config.decoder_start_token_id = tokenizer.bos_token_id or tokenizer.cls_token_id
-
-    else:
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_config.hf_path,
-            ignore_mismatched_sizes=True,
-        )
-
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        model_config.hf_path,
+        ignore_mismatched_sizes=True,
+    )
     model = model.to(device)
-    logger.info(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
+
+    logger.info(
+        f"Model loaded. Parameters: "
+        f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M"
+    )
     return model, tokenizer
 
 
-def load_led_fact_model(model_config: ModelConfig, device=None, led_fact_config_override=None):
+def load_bart_fact_model(
+    model_config: ModelConfig, device=None, bart_fact_config_override=None
+):
+    """Load a BART-FaCT model (BART + HSE + CFA + CPO)."""
     if device is None:
         device = get_device()
 
-    if led_fact_config_override is not None:
-        led_fact_config = led_fact_config_override
+    if bart_fact_config_override is not None:
+        bart_fact_config = bart_fact_config_override
     else:
-        led_fact_config = get_led_fact_config(model_config.name)
-    led_fact_config.max_input_length = model_config.max_input_length
-    led_fact_config.max_target_length = model_config.max_target_length
+        bart_fact_config = get_bart_fact_config(model_config.name)
+    bart_fact_config.max_input_length = model_config.max_input_length
+    bart_fact_config.max_target_length = model_config.max_target_length
 
-    logger.info(f"Loading LED-FaCT model: {model_config.name}")
-    logger.info(f"  SAE: {led_fact_config.use_sae}, FGCA: {led_fact_config.use_fgca}, CFL: {led_fact_config.use_cfl}")
+    logger.info(f"Loading BART-FaCT model: {model_config.name}")
+    logger.info(
+        f"  HSE: {bart_fact_config.use_hse}, "
+        f"CFA: {bart_fact_config.use_cfa}, "
+        f"CPO: {bart_fact_config.use_cpo}"
+    )
 
-    model = LEDFaCTForConditionalGeneration(led_fact_config)
+    model = BARTFaCTForConditionalGeneration(bart_fact_config)
     model = model.to(device)
 
     param_info = model.get_trainable_params_summary()
@@ -222,19 +287,27 @@ def load_led_fact_model(model_config: ModelConfig, device=None, led_fact_config_
     return model, model.tokenizer
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Main training entry point
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def train_model(
     model_name: str,
     dataset_name: str = "arxiv",
     max_samples: int = None,
     training_config: TrainingConfig = None,
     max_input_length: int = None,
-    led_fact_config_override=None,
+    bart_fact_config_override=None,
 ):
+    """Train a single model (standard or BART-FaCT)."""
     set_seed(training_config.seed if training_config else 42)
 
     model_config = get_model_config(model_name)
     if max_input_length is not None:
-        model_config.max_input_length = min(max_input_length, model_config.max_input_length)
+        model_config.max_input_length = min(
+            max_input_length, model_config.max_input_length
+        )
 
     if training_config is None:
         training_config = TrainingConfig(
@@ -249,22 +322,19 @@ def train_model(
     )
     os.makedirs(output_dir, exist_ok=True)
 
-    is_led_fact = model_config.is_led_fact
+    is_bart_fact = model_config.is_bart_fact
 
-    if is_led_fact:
-        model, tokenizer = load_led_fact_model(model_config, led_fact_config_override=led_fact_config_override)
+    # Load model
+    if is_bart_fact:
+        model, tokenizer = load_bart_fact_model(
+            model_config, bart_fact_config_override=bart_fact_config_override
+        )
     else:
         model, tokenizer = load_model_and_tokenizer(model_config)
 
-    if model_config.is_led and not is_led_fact:
-        model.config.attention_mode = "sliding_chunks"
-        model.config.attention_window = [1024] * model.config.num_hidden_layers if hasattr(model.config, 'num_hidden_layers') else [1024] * 12
-        model.config.max_source_positions = model_config.max_input_length
-        model.config.max_target_positions = 256
-        tokenizer.model_max_length = model_config.max_input_length
-
-    if is_led_fact:
-        dataset = prepare_dataset_for_led_fact(
+    # Prepare dataset
+    if is_bart_fact:
+        dataset = prepare_dataset_for_bart_fact(
             dataset_name=dataset_name,
             tokenizer=tokenizer,
             max_input_length=model_config.max_input_length,
@@ -278,13 +348,13 @@ def train_model(
             max_input_length=model_config.max_input_length,
             max_target_length=model_config.max_target_length,
             max_samples=max_samples,
-            is_led=model_config.is_led,
         )
 
-    if is_led_fact:
-        data_collator = LEDFaCTDataCollator(
+    # Data collator
+    if is_bart_fact:
+        data_collator = BARTFaCTDataCollator(
             tokenizer=tokenizer,
-            model=model.led,
+            model=model.bart,
             padding=True,
         )
     else:
@@ -294,12 +364,13 @@ def train_model(
             padding=True,
         )
 
-    led_fact_model = model if is_led_fact else None
-    cfl_enabled = False
-    cfl_alpha = 0.1
-    if is_led_fact and led_fact_model is not None:
-        cfl_enabled = led_fact_model.config.use_cfl
-        cfl_alpha = led_fact_model.config.cfl_alpha
+    # CPO config
+    bart_fact_model = model if is_bart_fact else None
+    cpo_enabled = False
+    cpo_alpha = 0.15
+    if is_bart_fact and bart_fact_model is not None:
+        cpo_enabled = bart_fact_model.config.use_cpo
+        cpo_alpha = bart_fact_model.config.cpo_alpha
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
@@ -315,7 +386,7 @@ def train_model(
         fp16=training_config.fp16 and get_device().type == "cuda",
         gradient_checkpointing=training_config.gradient_checkpointing,
         logging_steps=training_config.logging_steps,
-        eval_strategy="steps" if "validation" in dataset else "no",
+        evaluation_strategy="steps" if "validation" in dataset else "no",
         eval_steps=training_config.eval_steps if "validation" in dataset else None,
         save_steps=training_config.save_steps,
         save_total_limit=training_config.save_total_limit,
@@ -325,8 +396,8 @@ def train_model(
         load_best_model_at_end=True if "validation" in dataset else False,
         metric_for_best_model="eval_loss" if "validation" in dataset else None,
         seed=training_config.seed,
-        remove_unused_columns=False if is_led_fact else True,
-        dataloader_num_workers=0 if get_device().type == "cpu" else 4,
+        remove_unused_columns=False if is_bart_fact else True,
+        dataloader_num_workers=0 if get_device().type == "cpu" else 2,
         dataloader_pin_memory=get_device().type == "cuda",
     )
 
@@ -335,25 +406,33 @@ def train_model(
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation", None),
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         data_collator=data_collator,
     )
-    if is_led_fact:
+    if is_bart_fact:
         trainer_kwargs.update(
-            led_fact_model=led_fact_model,
-            use_cfl=cfl_enabled,
-            cfl_alpha=cfl_alpha,
+            bart_fact_model=bart_fact_model,
+            use_cpo=cpo_enabled,
+            cpo_alpha=cpo_alpha,
         )
-    trainer = LEDFaCTTrainer(**trainer_kwargs) if is_led_fact else Seq2SeqTrainer(**trainer_kwargs)
 
-    logger.info(f"Starting training: {model_name} on {dataset_name} with ctx={model_config.max_input_length}")
+    trainer = (
+        BARTFaCTTrainer(**trainer_kwargs)
+        if is_bart_fact
+        else Seq2SeqTrainer(**trainer_kwargs)
+    )
+
+    logger.info(
+        f"Starting training: {model_name} on {dataset_name} "
+        f"with ctx={model_config.max_input_length}"
+    )
     train_result = trainer.train()
 
     metrics = train_result.metrics
     trainer.save_metrics("train", metrics)
 
     trainer.save_model(output_dir)
-    if not is_led_fact:
+    if not is_bart_fact:
         tokenizer.save_pretrained(output_dir)
 
     logger.info(f"Training complete. Metrics: {metrics}")
@@ -367,11 +446,14 @@ def train_multiple_context_lengths(
     max_samples: int = None,
     base_config: TrainingConfig = None,
 ):
+    """Train a model at multiple context lengths."""
     if context_lengths is None:
-        context_lengths = [512, 1024, 2048, 4096, 8192]
+        context_lengths = [256, 512, 768, 1024]
 
     model_config = get_model_config(model_name)
-    valid_lengths = [cl for cl in context_lengths if cl <= model_config.max_input_length]
+    valid_lengths = [
+        cl for cl in context_lengths if cl <= model_config.max_input_length
+    ]
 
     results = {}
     for ctx_len in valid_lengths:
@@ -401,16 +483,24 @@ def train_multiple_context_lengths(
     return results
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train summarization models")
-    parser.add_argument("--model", type=str, default="bart-large-cnn", help="Model name")
-    parser.add_argument("--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"])
+    parser.add_argument(
+        "--model", type=str, default="bart-large-cnn", help="Model name"
+    )
+    parser.add_argument(
+        "--dataset", type=str, default="arxiv", choices=["arxiv", "pubmed"]
+    )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=3e-5)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_input_length", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="./results")
@@ -438,7 +528,11 @@ if __name__ == "__main__":
             max_samples=args.max_samples,
             base_config=config,
         )
-        print(json.dumps({k: v.get("status", "unknown") for k, v in results.items()}, indent=2))
+        print(
+            json.dumps(
+                {k: v.get("status", "unknown") for k, v in results.items()}, indent=2
+            )
+        )
     else:
         trainer, model, tokenizer = train_model(
             model_name=args.model,

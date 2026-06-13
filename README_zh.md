@@ -1,13 +1,13 @@
 <div align="center">
 
-# LED-FaCT：基于章节感知嵌入与忠实度门控的长文档摘要事实性增强方法
+# BART-FaCT
 
-### Section-Aware Embedding + Faithfulness-Gated Cross-Attention + Contractive Factuality Loss
+### 面向长文档摘要的事实性增强方法：层次化结构编码与校准式忠实度注意力
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_REPO/blob/main/notebooks/run.ipynb)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.6+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.40+-FFD21E)](https://huggingface.co/docs/transformers)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.35+-FFD21E)](https://huggingface.co/docs/transformers)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -16,223 +16,122 @@
 
 ## 摘要
 
-LED（Longformer Encoder-Decoder）通过滑动窗口注意力机制将序列建模能力扩展至 16,384 token，在长文档摘要任务上显著缓解了截断导致的信息丢失问题。然而，LED 仍存在三方面不足：（1）将整篇论文编码为扁平 token 序列，无法区分摘要、方法、结论等具有不同语义角色的篇章结构，导致注意力分配缺乏篇章感知；（2）解码器交叉注意力对所有源文信息等权关注，缺乏约束模型忠于原文的机制，容易产生看似流畅实则偏离源文的幻觉内容；（3）标准交叉熵损失仅优化 token 级概率，无法为模型提供事实一致性判别信号。针对上述不足，我们提出 **LED-FaCT** 框架，包含三个递进式创新模块：**篇章结构感知嵌入（SAE）** 自动识别文档章节边界并将结构信号注入编码器嵌入层，使模型感知每个 token 所处的语义区段；**事实忠实度门控交叉注意力（FGCA）** 在每层解码器交叉注意力后引入可学习门控机制，动态调节源文依赖与自主生成的比例，从机制上抑制幻觉倾向；**对比式事实性损失（CFL）** 以参考摘要为锚点构造扰动负样本，通过 InfoNCE 对比学习拉近忠实摘要与源文的表征距离、推离幻觉样本，为训练过程注入事实性监督信号。在 arXiv 与 PubMed 两个长文档摘要基准上的实验表明，LED-FaCT 在 ROUGE 指标上较 LED 基线提升显著，幻觉率降低 3.8%，上下文长度消融（512→16,384 token）进一步证实扩展输入窗口在超过 2,048 token 的文档上带来 +4.2 ROUGE-L 增益。
+为科学论文生成忠实摘要是困难的，原因有二，且二者相互加剧。其一，BART 等标准编码器-解码器模型将论文处理为扁平的 token 序列——摘要中的一句话和方法章节中的一句话对编码器来说并无区别，模型不知道每条信息处于论文论证结构的什么位置。其二，解码器的交叉注意力在每一步对所有编码器位置等权分配权重，模型无法判断自己是在从源文中检索某个具体结果，还是在猜测一个听上去合理的数字。上下文越长，注意力越弥散，模型就越倾向于依赖其语言模型先验进行补全，生成流畅但缺乏源文依据的内容。最大似然估计下的交叉熵损失无法区分这两种行为。
+
+我们提出 **BART-FaCT**，它在一个已预训练于摘要任务的 BART 模型上增加三个轻量模块，每个模块针对一类特定的失效模式。**HSE**（层次化结构编码）学习文档的层次化表示——句子、段落、章节——并将其注入 token 嵌入，使编码器知晓每个 token 位于论文论证结构的何处。**CFA**（校准式忠实度注意力）用一个瓶颈网络包裹每层解码器交叉注意力，估计逐 token 的忠实度不确定性，并据此调节源文注意力的贡献：不确定时更仔细地回看源文。**CPO**（对比式偏好优化）以模型自身在无编码器条件下的生成作为非偏好响应，用 DPO 风格的偏好损失替代启发式负采样，直接告诉模型「有源文依据的摘要优于凭空生成的摘要」。
+
+我们在 arXiv 和 PubMed 两个长文档摘要基准上进行了评估，与四个预训练摘要模型进行了对比，并通过五组模块消融分离了各组件的独立贡献。
 
 ---
 
-## 动机与模块设计
+## 三个模块
 
-### 问题一：长文档的篇章结构失明
+### HSE · 层次化结构编码
 
-> 科学论文具有清晰的层级结构——摘要交代全貌，引言阐述动机，方法描述细节，结果给出证据，结论提炼洞见。然而 LED 将全部 16,384 个 token 编码为扁平序列，模型无法感知当前正在处理的 token 所隶属的语义篇章，注意力分配对方法与结论一视同仁，难以聚焦于真正承载创新贡献的章节。
+科学论文天然具有层次化的组织结构——论点建立在方法之上，结果支撑结论——但 BART 将整篇论文当作一长串字符来读。此前的工作尝试用正则表达式检测章节标题（如匹配 "Introduction"）来解决这一问题，但这在不同学科间泛化性很差，也无法捕捉句子层面的篇章推进。
 
-**SAE（篇章结构感知嵌入）** 通过基于规则的章节检测器识别文档结构，为每个 token 分配语义篇章标签，并经可学习嵌入矩阵融入编码过程：
-
-```
-input_embedding = word_embed(tokens) + position_embed(positions) + section_embed(section_ids)
-```
-
-篇章标签集：`[PAD, ABSTRACT, INTRODUCTION, METHOD, EXPERIMENT, RESULT, CONCLUSION, OTHER]`
-
-**作用**：编码器不再对长文进行扁平编码，而是以结构化视角审视每一段内容——方法部分的 token 获得了"我处于方法章节"的篇章感知，结论部分的 token 也相应获得语义锚定。
-
-### 问题二：无约束生成导致的幻觉
-
-> 交叉注意力使解码器在每一步都能回看编码器的全部输出，但当源文跨度达到数千 token 时，注意力分布趋于均匀和弥散——模型不再精确追踪"哪些信息来自源文"，转而依赖自身语言先验进行续写，产生看似通顺实则偏离原文的幻觉内容。这是一个从忠实翻译滑向自由想象的机制性缺陷。
-
-**FGCA（事实忠实度门控交叉注意力）** 在每层解码器的交叉注意力后引入可学习门控机制。门控以交叉注意力输出与自注意力输出的拼接为输入，逐维度生成 0–1 间的连续门控值：
+HSE 采用了不同的思路。它先用 NLTK 的语言学句子分割器检测句子边界，再对每个句子的 token 表示做 mean-pool，用一个紧凑的 2 层 Transformer（4 头、256 维 FFN、Pre-LN、GELU）对这些句子向量进行编码，建模句子之间的逻辑关系和篇章位置。结构增强的表示通过可学习门控广播回每个 token：
 
 ```
-gate = σ(W_g · [cross_attn_output ⊕ self_attn_output] + b_g)
-gated_output = gate ⊙ cross_attn_output + (1 − gate) ⊙ self_attn_output
-hybrid_output = 0.5 · decoder_output + 0.5 · gated_output
+增强嵌入 = token嵌入 + σ(W·[token嵌入 ⊕ 结构上下文]) ⊙ 结构上下文
 ```
 
-- 门控值趋 **1**：解码侧重源文——忠实复述关键事实
-- 门控值趋 **0**：解码侧重自身——灵活组织表达
-- 半数混合残差连接保障梯度流的稳定性
+此后编码器看到的就不仅是「这是第 547 号 token」，而是「这是 Methods 章节的第三句话」。模块约增加 270 万参数，仅占 BART-Large 骨架的 0.7%。
 
-**作用**：模型在逐层解码中学会何时忠实、何时灵活——面对需要精确复述的事实性内容时门控值趋高，面对需要自然衔接的过渡区段时门控值适度降低。
+> **文献依据。** Hierarchical Transformers (Liu & Lapata, EMNLP 2019); Lost in the Middle (Liu et al., TACL 2023)。
 
-### 问题三：损失函数的事实一致性盲区
+---
 
-> 交叉熵损失仅逐 token 优化生成概率，完全无法提供"该摘要是否与源文事实一致"的监督信号。换言之，模型仅被教导写出看似合理的摘要，却从未获得事实一致性的判别能力——这是幻觉问题的训练根源。
+### CFA · 校准式忠实度注意力
 
-**CFL（对比式事实性损失）** 以参考摘要为锚点，通过定向扰动（实体替换、数字篡改、语序打乱）构造负样本，再以 InfoNCE 框架在表征空间中施加对比约束：
+在标准解码器中，交叉注意力对编码器状态求加权平均并与自注意力输出相加。无论是正在从源文检索事实还是在生成过渡句，执行的操作完全相同。模型无法表达「我对此处不确定——我需要更仔细地看源文」。
+
+CFA 赋予了每个解码器层这种能力。一个小型瓶颈网络接收交叉注意力输出和自注意力状态，通过 128 维隐藏层压缩后估计每个 token 的不确定性标量。该不确定性作为加性偏置作用于忠实度门控：
 
 ```
-L_cfl = −log(exp(sim(h_source, h_positive)/τ) / Σ_j exp(sim(h_source, h_j)/τ))
-L_total = L_ce + α · L_cfl    (α = 0.1)
+不确定性 = σ(MLP([cross_attn ⊕ self_attn]))
+门控 = σ(W·瓶颈 + 不确定性)
+输出 = 门控 ⊙ cross_attn + (1−门控) ⊙ self_attn
 ```
 
-**作用**：对比损失在表示空间中构建事实一致性的判别边界——忠实摘要的表征与源文聚拢，幻觉样本的表征被推离，使模型在生成阶段自然趋向事实一致性。
+当模型不确定时（注意力弥散、cross/self 差异大），门控值偏向源文——「回去看论文」。当模型自信时，门控允许更自由的表达。与原始解码器输出的 0.5–0.5 残差混合保证了训练稳定性。单层开销约 32 万参数，12 层合计约 380 万。
 
-### 递进消融实验
+> **文献依据。** DoLa (Chuang et al., ICLR 2024); Context-Aware Decoding (Shi et al., ACL 2024)。
 
-| 配置 | SAE | FGCA | CFL | 消融所要回答的问题 |
+---
+
+### CPO · 对比式偏好优化
+
+交叉熵损失教模型挑选概率最高的 token，但它不会告诉模型摘要应当有源文依据。一个编造的数字和一个忠实转述的数字，只要都和参考措辞不同，就获得相同的损失。
+
+此前的工作通过 InfoNCE 对比损失来缓解这一问题，但负样本是手工扰动构造的——替换实体、篡改数字、打乱句子。这些合成扰动未必反映模型真实的失效模式。CPO 用模型自身来构造负样本：偏好响应是人类参考摘要，非偏好响应是模型在编码器隐状态全为零的条件下——纯解码器，从 BOS 出发——生成的文本。这是模型完全脱离源文的语言先验。这份文本中的任何事实性内容，按构造即是幻觉。
+
+DPO 风格的偏好损失将模型拉向有源文依据的生成：
+
+```
+L_cpo = −log σ(β·[log π(y_pref|x) − log π(y_disf|x)])
+L_total = L_ce + λ·L_cpo   (λ=0.15, β=0.5)
+```
+
+投影头约增加 120 万参数。
+
+> **文献依据。** DPO (Rafailov et al., NeurIPS 2023); Model-based Preference Optimization (Gao et al., EMNLP 2024)。
+
+---
+
+## 消融设计
+
+| 配置 | HSE | CFA | CPO | 所回答的问题 |
 |:---|:---:|:---:|:---:|:---|
-| LED（基线） | ✗ | ✗ | ✗ | 长上下文建模的基线水平如何？ |
-| LED-FaCT w/o SAE | ✗ | ✓ | ✓ | 去掉篇章结构感知后性能下降多少？ |
-| LED-FaCT w/o FGCA | ✓ | ✗ | ✓ | 缺乏事实忠实度门控时幻觉率如何变化？ |
-| LED-FaCT w/o CFL | ✓ | ✓ | ✗ | 没有对比式事实性损失约束，一致性如何？ |
-| **LED-FaCT（完整）** | **✓** | **✓** | **✓** | 三者协同能否达到最优？ |
+| BART-Large-CNN | ✗ | ✗ | ✗ | 预训练摘要模型在无增强时的基线水平 |
+| w/o HSE | ✗ | ✓ | ✓ | 结构编码能否在忠実度模块之上提供额外增益？ |
+| w/o CFA | ✓ | ✗ | ✓ | 校准式注意力能否进一步降低幻觉？ |
+| w/o CPO | ✓ | ✓ | ✗ | 偏好优化能否进一步提升事实性？ |
+| **完整模型** | **✓** | **✓** | **✓** | 三者是否互补？ |
 
 ---
 
-## 模型架构
+## 对比模型
 
-```
-输入：科学论文 (4,000–16,000 tokens)
-        │
-   ┌────▼─────────────────────────────────────┐
-   │  Section Detector (SAE)                   │  ← 检测文档结构边界
-   │  section_ids → section_embedding          │
-   └────┬──────────────────────────────────────┘
-        │
-        ▼
-   input_emb = word_emb + pos_emb + section_emb  ← 问题1已解决
-        │
-   ┌────▼─────────────────────────────────────┐
-   │  Longformer 编码器 (12层, 16K上下文)      │
-   │  滑动窗口注意力                             │
-   └────┬──────────────────────────────────────┘
-        │ encoder_hidden_states
-        │
-   ┌────▼─────────────────────────────────────┐
-   │  LED 解码器 (12层)                         │
-   │  ┌───────────────────────────┐            │
-   │  │ Self-Attention             │            │
-   │  └─────────┬─────────────────┘            │
-   │  ┌─────────▼─────────────────┐            │
-   │  │ Cross-Attention            │            │
-   │  └─────────┬─────────────────┘            │
-   │  ┌─────────▼─────────────────┐            │
-   │  │ FGCA 门控 ◄──────────────┤            │  ← 问题2已解决
-   │  │ = gate·cross + (1-gate)·self          │
-   │  └─────────┬─────────────────┘            │
-   │  ┌─────────▼─────────────────┐            │
-   │  │ FFN + LayerNorm            │            │
-   │  └─────────┬─────────────────┘            │
-   └────────────┼──────────────────────────────┘
-                │
-        ┌───────┴───────┐
-        │               │
-        ▼               ▼
-   L_ce (生成损失)     L_cfl (对比事实性损失)   ← 问题3已解决
-        │               │
-        └───────┬───────┘
-                ▼
-      L_total = L_ce + α · L_cfl
-```
+所有对比模型均为预训练好的摘要模型，可直接用于推理。
+
+| 模型 | 来源 | 参数 |
+|:---|:---|:---:|
+| BART-Large-CNN | `facebook/bart-large-cnn` | 400M |
+| PEGASUS-arXiv | `google/pegasus-arxiv` | 568M |
+| PEGASUS-CNN/DM | `google/pegasus-cnn_dailymail` | 568M |
+| DistilBART-CNN-12-6 | `sshleifer/distilbart-cnn-12-6` | 306M |
+| **BART-FaCT** | 本文 | **~403M** |
 
 ---
 
 ## 快速开始
 
-### 环境安装
-
 ```bash
 git clone <repo-url> && cd end
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-# 或不使用镜像：pip install -r requirements.txt
-```
 
-> **硬件要求**：推荐单卡 GPU ≥20 GB 显存（上下文长度 8192）。LED 在 8192 上下文下约需 18-20 GB 显存（batch_size=2 + gradient_checkpointing）。建议设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 减少显存碎片。
-
-国内用户如遇 HuggingFace 下载问题，代码已内置镜像源（`hf-mirror.com`），无需手动配置。
-
-### 冒烟测试（约 30 秒）
-
-```bash
+# 冒烟测试
 python src/run_experiments.py --mode quick_test --dataset arxiv
-```
 
-### 完整实验
-
-```bash
-# 实验1：多模型对比
+# 多模型对比
 python src/run_experiments.py --mode exp1 --dataset arxiv \
-    --models "bart-large-cnn,pegasus-arxiv,led-base-16384" \
+    --models "bart-large-cnn,pegasus-arxiv,pegasus-cnn_dailymail,distilbart-cnn-12-6" \
     --max_samples 1000 --num_test 100
 
-# 实验2：模块消融（核心实验）
+# 模块消融
 python src/run_experiments.py --mode ablation --ablation_type all
-
-# 实验3：上下文长度消融
-python src/run_experiments.py --mode exp4 --dataset arxiv --max_samples 1000
-
-# 全流程
-python src/run_experiments.py --mode full --dataset arxiv --max_samples 1000
 ```
 
 ---
 
-## 实验设计
+## 评估指标
 
-### 模型对比
+**质量：** ROUGE-1/2/L/Lsum, BERTScore F1, METEOR
 
-| 模型 | 架构 | 上下文窗口 | 参数量 | 关键特征 |
-|:---|:---:|:---:|:---:|:---|
-| BART-Large-CNN | Encoder-Decoder | 1,024 | 400M | 短上下文基线 |
-| PEGASUS-arXiv | Encoder-Decoder | 1,024 | 568M | 领域微调基线 |
-| LED-Base-16384 | Longformer Enc-Dec | 8,192 | 161M | 长上下文基线 |
-| **LED-FaCT（本项目）** | Longformer + SAE + FGCA + CFL | **8,192** | **~170M** | **忠实长上下文** |
+**事实性：** NLI 蕴含率 (RoBERTa-large-MNLI), 幻觉率 (内在/外在/矛盾), n-gram 重叠率
 
-### 评估指标
-
-**质量指标**：ROUGE-1/2/L/Lsum、BERTScore F1、METEOR
-
-**事实性指标**：NLI 蕴含率（RoBERTa-large-MNLI）、幻觉率（内在/外在/矛盾）、n-gram 重叠率、新词率
-
-**辅助指标**：压缩比、JS 散度、4-gram 重复率
-
-### 五大实验
-
-| # | 实验 | 自变量 | 因变量 |
-|:---:|:---|:---|:---|
-| E1 | 多模型对比 | 模型架构 | ROUGE + 事实性 |
-| E2 | 模块消融 | SAE / FGCA / CFL | 各模块独立贡献 |
-| E3 | 幻觉深度分析 | 模型类型 | 幻觉率与类型分布 |
-| E4 | 上下文长度消融 | 输入长度（512→8192） | ROUGE 衰减曲线 |
-| E5 | 参数敏感性 | beam size、α、隐层维度、LR 等 | 鲁棒性 |
-
----
-
-## 训练与评估
-
-### 训练
-
-```bash
-# 单模型训练
-python src/train.py --model led-base-16384 --dataset arxiv --epochs 3 --max_samples 1000
-
-# LED-FaCT 完整模型
-python src/run_experiments.py --mode ablation --ablation_type led_fact_full
-
-# 多上下文长度训练
-python src/train.py --model led-base-16384 --context_lengths "1024,4096,8192"
-```
-
-### 评估
-
-```bash
-# 完整指标评估
-python src/evaluate.py --model led-base-16384 --dataset arxiv --num_test 100
-
-# 上下文长度扫描
-python src/evaluate.py --model led-base-16384 \
-    --context_lengths "512,1024,2048,4096,8192"
-```
-
-### 模块消融
-
-```bash
-python src/run_experiments.py --mode ablation --ablation_type led_baseline     # 基线
-python src/run_experiments.py --mode ablation --ablation_type led_fact_no_sae  # 去掉 SAE
-python src/run_experiments.py --mode ablation --ablation_type led_fact_no_fgca # 去掉 FGCA
-python src/run_experiments.py --mode ablation --ablation_type led_fact_no_cfl  # 去掉 CFL
-python src/run_experiments.py --mode ablation --ablation_type led_fact_full    # 完整模型
-```
+**辅助：** 压缩比, JS 散度, 4-gram 重复率
 
 ---
 
@@ -241,89 +140,38 @@ python src/run_experiments.py --mode ablation --ablation_type led_fact_full    #
 ```
 end/
 ├── src/
-│   ├── models/                    # ★ 三个创新模块
-│   │   ├── led_fact.py            # LED-FaCT 主模型 + 配置
-│   │   ├── section_embedding.py   # SAE — 章节感知嵌入
-│   │   ├── faithfulness_gate.py   # FGCA — 忠实度门控交叉注意力
-│   │   └── contrastive_loss.py    # CFL — 对比事实性损失
-│   ├── config.py                  # 模型与训练配置
-│   ├── data_utils.py             # 数据集加载 + 章节检测
-│   ├── train.py                   # 训练（含 LEDFaCTTrainer + LEDFaCTDataCollator）
-│   ├── evaluate.py               # ROUGE + 集成评估
-│   ├── benchmark.py              # BERTScore、METEOR、JS 散度
-│   ├── hallucination.py          # NLI 蕴含评分、幻觉类型学
-│   ├── ablation.py               # 五组模块消融实验
-│   ├── sensitivity.py            # 参数敏感性分析
-│   ├── analyze.py                # 绘图 + LaTeX 表格
-│   └── run_experiments.py        # 统一 CLI 入口
-├── notebooks/                     # Jupyter notebooks
-├── data/                         # 自动下载数据集缓存
-├── results/                      # 实验结果 + 图表
-├── EXPERIMENT_PLAN.md            # 详细实验方案
-├── README.md                     # English README
-└── README_zh.md                  # 中文说明（本文件）
+│   ├── models/
+│   │   ├── bart_fact.py              # 主模型与配置
+│   │   ├── hierarchical_structure.py # HSE 模块
+│   │   ├── calibrated_attention.py   # CFA 模块
+│   │   └── preference_loss.py        # CPO 模块
+│   ├── config.py / data_utils.py
+│   ├── train.py / evaluate.py / benchmark.py
+│   ├── hallucination.py / ablation.py / sensitivity.py
+│   ├── analyze.py / visualization.py
+│   └── run_experiments.py
+├── notebooks/
+│   ├── run.ipynb          # 实验运行 (兼容 Colab)
+│   └── preview.ipynb      # 模块可视化演示
+├── data/ / results/
+└── README.md / README_zh.md / EXPERIMENT_PLAN.md
 ```
 
 ---
 
-## GPU 需求
+## 参考文献
 
-| 模型 | 训练显存 | 推理显存 | 预估时间（1K 样本，3 epochs） |
-|:---|:---:|:---:|:---|
-| BART-Large | ~8 GB | ~4 GB | 25–50 分钟 |
-| PEGASUS | ~10 GB | ~5 GB | 35–60 分钟 |
-| LED-Base (8192) | ~18 GB | ~6 GB | 1–1.5 小时 |
-| LED-FaCT（完整, 8192） | ~20 GB | ~7 GB | 1.5–2.5 小时 |
-
-> **提示**：设置 `--max_samples 500` 可减少约 80% 训练时间，质量损失轻微。显存不足时使用 `gradient_checkpointing=True` 或降低 `batch_size=1`。
-
----
-
-## 预期结果
-
-### 上下文长度消融（预期趋势）
-
-```
-ROUGE-L F1
-0.30 ┤                    ╭────── LED-FaCT
-        │              ╭─────╯
-  0.25 ┤        ╭─────╯
-        │  ╭─────╯
-  0.20 ┤──╯
-        │  BART / PEGASUS（截断至1024）
-        │
-        └──┬─────┬─────┬─────┬─────┬─────┬──
-           512  1024  2048  4096  8192
-                        输入上下文长度（默认=8192）
-```
-
-### 预期关键发现
-
-| 发现 | 证据来源 |
-|:---|:---|
-| 长文档（>2K token）下，扩展上下文窗口带来显著收益而非模型容量 | 上下文长度消融 |
-| SAE 使编码器获得篇章结构感知，对方法与结论的注意力分配更精准 | 模块消融（w/o SAE） |
-| FGCA 通过可学习门控机制在事实忠实性与表达灵活性间实现动态平衡，是降低幻觉率的关键 | 模块消融（w/o FGCA） |
-| CFL 提供最大的事实性改进——对比损失为模型注入了事实一致性的判别力 | 模块消融（w/o CFL） |
-| 截断策略的影响呈梯度分布：head+tail > head-only > tail-only | 截断策略消融 |
-| NLI 蕴含率与幻觉率强负相关，验证了事实性检测框架的有效性 | 幻觉深度分析 |
-
----
-
-## 引用
-
-```bibtex
-@article{led-fact-summarization-factuality,
-  title={LED-FaCT: 基于章节感知嵌入与忠实度门控的长文档摘要事实性增强方法},
-  author={Your Name},
-  journal={浙江财经大学},
-  year={2026},
-  note={自然语言处理课程项目}
-}
-```
+1. Liu & Lapata. "Hierarchical Transformers for Long Document Summarization." *EMNLP*, 2019.
+2. Chuang et al. "DoLa: Decoding by Contrasting Layers Improves Factuality." *ICLR*, 2024.
+3. Rafailov et al. "Direct Preference Optimization." *NeurIPS*, 2023.
+4. Shi et al. "Context-Aware Decoding for Faithful Summarization." *ACL*, 2024.
+5. Gao et al. "Model-based Preference Optimization in Summarization without Human Feedback." *EMNLP*, 2024.
+6. Liu et al. "Lost in the Middle: How Language Models Use Long Contexts." *TACL*, 2023.
+7. Lewis et al. "BART: Denoising Sequence-to-Sequence Pre-training." *ACL*, 2020.
+8. Zhang et al. "PEGASUS: Pre-training with Extracted Gap-sentences." *ICML*, 2020.
 
 ---
 
 ## 许可证
 
-本项目基于 [MIT License](LICENSE) 发布。所有预训练模型遵循 HuggingFace Transformers 各自的许可证使用。arXiv 和 PubMed 数据集遵循其公开学术许可。
+MIT。预训练模型遵循 HuggingFace 各自许可证。

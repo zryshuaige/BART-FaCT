@@ -189,7 +189,7 @@ def plot_fgca_gate_heatmap(
     gate_values_all_layers: List[np.ndarray],
     token_labels: Optional[List[str]] = None,
     max_tokens: int = 50,
-    title: str = "FGCA Gate Values Heatmap",
+    title: str = "CFA Uncertainty Heatmap",
     output_path: Optional[str] = None,
 ):
     num_layers = len(gate_values_all_layers)
@@ -232,7 +232,7 @@ def plot_fgca_gate_heatmap(
 
 def plot_fgca_gate_histogram(
     gate_values: np.ndarray,
-    title: str = "FGCA Gate Value Distribution",
+    title: str = "CFA Uncertainty Distribution",
     output_path: Optional[str] = None,
 ):
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -284,7 +284,7 @@ def highlight_diff(original: str, perturbed: str) -> str:
 
 def visualize_cfl_perturbation(
     original: str,
-    title: str = "CFL Contrastive Perturbation",
+    title: str = "CPO Preference Pairs",
 ):
     from models.contrastive_loss import SummaryPerturbator
 
@@ -336,7 +336,7 @@ def visualize_cfl_perturbation(
 def plot_contrastive_similarity(
     pos_sims: np.ndarray,
     neg_sims: np.ndarray,
-    title: str = "CFL Positive vs Negative Similarity",
+    title: str = "CPO Preference Score Distribution",
     output_path: Optional[str] = None,
 ):
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -372,13 +372,15 @@ def plot_summary_comparison(
 ):
     model_colors = {
         "Reference": "#27AE60",
-        "LED (Baseline)": "#3498DB",
-        "LED-FaCT (Full)": "#E74C3C",
-        "LED-FaCT w/o SAE": "#F39C12",
-        "LED-FaCT w/o FGCA": "#9B59B6",
-        "LED-FaCT w/o CFL": "#1ABC9C",
+        "BART (Baseline)": "#3498DB",
+        "BART-FaCT (Full)": "#E74C3C",
+        "BART-FaCT w/o HSE": "#F39C12",
+        "BART-FaCT w/o CFA": "#9B59B6",
+        "BART-FaCT w/o CPO": "#1ABC9C",
         "BART-Large-CNN": "#95A5A6",
         "PEGASUS-arXiv": "#34495E",
+        "BART-Base": "#607D8B",
+        "DistilBART-CNN": "#FF5722",
     }
 
     html_parts = [
@@ -428,20 +430,20 @@ def plot_ablation_radar(
         "bertscore_f1": "BERTScore",
     }
 
-    ablation_order = ["led_baseline", "led_fact_no_sae", "led_fact_no_fgca", "led_fact_no_cfl", "led_fact_full"]
+    ablation_order = ["bart_baseline", "bart_fact_no_hse", "bart_fact_no_cfa", "bart_fact_no_cpo", "bart_fact_full"]
     ablation_labels = {
-        "led_baseline": "LED (Baseline)",
-        "led_fact_no_sae": "w/o SAE",
-        "led_fact_no_fgca": "w/o FGCA",
-        "led_fact_no_cfl": "w/o CFL",
-        "led_fact_full": "LED-FaCT (Full)",
+        "bart_baseline": "BART (Baseline)",
+        "bart_fact_no_hse": "w/o HSE",
+        "bart_fact_no_cfa": "w/o CFA",
+        "bart_fact_no_cpo": "w/o CPO",
+        "bart_fact_full": "BART-FaCT (Full)",
     }
     ablation_colors = {
-        "led_baseline": "#3498DB",
-        "led_fact_no_sae": "#F39C12",
-        "led_fact_no_fgca": "#9B59B6",
-        "led_fact_no_cfl": "#1ABC9C",
-        "led_fact_full": "#E74C3C",
+        "bart_baseline": "#3498DB",
+        "bart_fact_no_hse": "#F39C12",
+        "bart_fact_no_cfa": "#9B59B6",
+        "bart_fact_no_cpo": "#1ABC9C",
+        "bart_fact_full": "#E74C3C",
     }
 
     available = [k for k in ablation_order if k in ablation_results and isinstance(ablation_results[k], dict) and "error" not in ablation_results[k]]
@@ -547,20 +549,20 @@ def plot_training_curves(
         axes[0].grid(True, alpha=0.3)
 
     ce_losses = [e.get("ce_loss", e.get("loss", 0)) for e in log_history if "loss" in e]
-    cfl_losses = [e.get("cfl_loss", 0) for e in log_history if "loss" in e]
+    cpo_losses = [e.get("cpo_loss", 0) for e in log_history if "loss" in e]
 
-    if any(c > 0 for c in cfl_losses):
+    if any(c > 0 for c in cpo_losses):
         axes[1].plot(train_steps, ce_losses, linewidth=1.5, color="#3498DB", label="CE Loss")
-        axes[1].plot(train_steps, cfl_losses, linewidth=1.5, color="#E74C3C", label="CFL Loss")
+        axes[1].plot(train_steps, cpo_losses, linewidth=1.5, color="#E74C3C", label="CPO Loss")
         axes[1].set_xlabel("Training Steps")
         axes[1].set_ylabel("Loss")
-        axes[1].set_title("CE Loss vs CFL Loss", fontsize=13, fontweight="bold")
+        axes[1].set_title("CE Loss vs CPO Loss", fontsize=13, fontweight="bold")
         axes[1].legend(fontsize=10)
         axes[1].grid(True, alpha=0.3)
     else:
-        axes[1].text(0.5, 0.5, "No CFL loss data\n(LED baseline or CFL disabled)",
+        axes[1].text(0.5, 0.5, "No CPO loss data\n(BART baseline or CPO disabled)",
                      ha="center", va="center", fontsize=14, transform=axes[1].transAxes)
-        axes[1].set_title("CFL Loss (N/A)", fontsize=13, fontweight="bold")
+        axes[1].set_title("CPO Loss (N/A)", fontsize=13, fontweight="bold")
 
     plt.suptitle(title, fontsize=15, fontweight="bold")
     plt.tight_layout()
