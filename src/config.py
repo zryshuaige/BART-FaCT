@@ -147,7 +147,7 @@ class TrainingConfig:
     fp16: bool = True
     gradient_checkpointing: bool = False
     logging_steps: int = 50
-    eval_steps: int = 200
+    eval_steps: int = 250
     save_steps: int = 500
     save_total_limit: int = 3
     beam_size: int = 4

@@ -388,7 +388,7 @@ def train_model(
         fp16=training_config.fp16 and get_device().type == "cuda",
         gradient_checkpointing=training_config.gradient_checkpointing,
         logging_steps=training_config.logging_steps,
-        eval_steps=training_config.eval_steps if "validation" in dataset else None,
+        eval_steps=max(training_config.eval_steps, 1) if "validation" in dataset else None,
         save_steps=training_config.save_steps,
         save_total_limit=training_config.save_total_limit,
         predict_with_generate=True,
