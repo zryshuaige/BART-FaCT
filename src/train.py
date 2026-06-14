@@ -440,7 +440,6 @@ def train_model(
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation", None),
-        tokenizer=tokenizer,
         data_collator=data_collator,
     )
     if is_bart_fact:
