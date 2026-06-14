@@ -1,10 +1,14 @@
-from dataclasses import dataclass, field, asdict
-from typing import Optional, List
+"""Model registry and runtime configuration for SUMM-Lens.
+
+All entries are inference-only. The registry covers a 2019→2024 baseline ladder
+plus four ablation configurations for the proposed CoD + NLR enhancements.
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Optional
 import copy
 
 import torch
-
-from models.bart_fact import BARTFaCTConfig, ABLATION_CONFIGS
 
 
 @dataclass
@@ -15,186 +19,156 @@ class ModelConfig:
     hf_path: str
     max_input_length: int
     max_target_length: int = 256
-    is_bart_fact: bool = False
+    is_causal_lm: bool = False  # True for chat LLMs (Qwen2.5-Instruct, Llama, ...)
     is_encoder_decoder: bool = True
     description: str = ""
+    # SUMM-Lens inference-time augmentation flags (only for causal-LM rows).
+    use_cod: bool = False
+    use_nlr: bool = False
+    cod_iters: int = 3
+    nlr_candidates: int = 4
+    nlr_temperature: float = 0.7
+    nlr_top_p: float = 0.95
 
 
-# ── Model registry ──────────────────────────────────────────────────────
+# ── Baseline ladder: 2019 → 2024 ───────────────────────────────────────
 
 MODEL_CONFIGS = {
-    # ── Baselines ──────────────────────────────────────────────────
+    # 2019 — original BART
     "bart-large-cnn": ModelConfig(
         name="bart-large-cnn",
         hf_path="facebook/bart-large-cnn",
         max_input_length=1024,
         max_target_length=256,
-        is_encoder_decoder=True,
-        description="BART-large fine-tuned on CNN/DailyMail — primary baseline (400M)",
+        description="BART-large fine-tuned on CNN/DailyMail (400M, 2019).",
+    ),
+    # 2020 — PEGASUS family
+    "pegasus-arxiv": ModelConfig(
+        name="pegasus-arxiv",
+        hf_path="google/pegasus-arxiv",
+        max_input_length=1024,
+        max_target_length=256,
+        description="PEGASUS fine-tuned on arXiv (568M, 2020).",
     ),
     "pegasus-cnn_dailymail": ModelConfig(
         name="pegasus-cnn_dailymail",
         hf_path="google/pegasus-cnn_dailymail",
         max_input_length=1024,
         max_target_length=256,
-        is_encoder_decoder=True,
-        description="PEGASUS fine-tuned on CNN/DailyMail (568M) — alternative summarization pre-training",
-    ),
-    "pegasus-arxiv": ModelConfig(
-        name="pegasus-arxiv",
-        hf_path="google/pegasus-arxiv",
-        max_input_length=1024,
-        max_target_length=256,
-        is_encoder_decoder=True,
-        description="PEGASUS fine-tuned on arXiv summarization (568M)",
-    ),
-    "pegasus-xsum": ModelConfig(
-        name="pegasus-xsum",
-        hf_path="google/pegasus-xsum",
-        max_input_length=512,
-        max_target_length=256,
-        is_encoder_decoder=True,
-        description="PEGASUS fine-tuned on XSum — extreme summarization (568M)",
+        description="PEGASUS fine-tuned on CNN/DailyMail (568M, 2020).",
     ),
     "distilbart-cnn-12-6": ModelConfig(
         name="distilbart-cnn-12-6",
         hf_path="sshleifer/distilbart-cnn-12-6",
         max_input_length=1024,
         max_target_length=256,
-        is_encoder_decoder=True,
-        description="DistilBART-CNN (306M) — distilled BART, fast inference baseline",
+        description="Distilled BART-CNN, fast inference baseline (306M, 2020).",
     ),
-
-    # ── BART-FaCT variants (HSE / CFA / CPO) ───────────────────────
-    "bart-fact-full": ModelConfig(
-        name="bart-fact-full",
-        hf_path="facebook/bart-large-cnn",
-        max_input_length=1024,
-        max_target_length=256,
-        is_bart_fact=True,
-        is_encoder_decoder=True,
-        description="BART-FaCT (Full): BART + HSE + CFA + CPO",
+    # 2020 — long-document specialist
+    "led-large-arxiv": ModelConfig(
+        name="led-large-arxiv",
+        hf_path="allenai/led-large-16384-arxiv",
+        max_input_length=4096,  # truncate from 16384 for free-tier RAM
+        max_target_length=512,
+        description="Longformer Encoder-Decoder fine-tuned on arXiv (460M, 2020).",
     ),
-    "bart-fact-no-hse": ModelConfig(
-        name="bart-fact-no-hse",
-        hf_path="facebook/bart-large-cnn",
-        max_input_length=1024,
-        max_target_length=256,
-        is_bart_fact=True,
-        is_encoder_decoder=True,
-        description="BART-FaCT w/o HSE: BART + CFA + CPO (no hierarchical structure)",
+    # 2024 — instruction-tuned LLM (vanilla)
+    "qwen2.5-1.5b": ModelConfig(
+        name="qwen2.5-1.5b",
+        hf_path="Qwen/Qwen2.5-1.5B-Instruct",
+        max_input_length=8192,
+        max_target_length=384,
+        is_causal_lm=True,
+        is_encoder_decoder=False,
+        description="Qwen2.5-1.5B-Instruct — 2024 zero-shot baseline (Apache 2.0).",
     ),
-    "bart-fact-no-cfa": ModelConfig(
-        name="bart-fact-no-cfa",
-        hf_path="facebook/bart-large-cnn",
-        max_input_length=1024,
-        max_target_length=256,
-        is_bart_fact=True,
-        is_encoder_decoder=True,
-        description="BART-FaCT w/o CFA: BART + HSE + CPO (no calibrated faithfulness attention)",
+    # SUMM-Lens variants (same backbone, different inference-time setup)
+    "summlens-cod": ModelConfig(
+        name="summlens-cod",
+        hf_path="Qwen/Qwen2.5-1.5B-Instruct",
+        max_input_length=8192,
+        max_target_length=384,
+        is_causal_lm=True,
+        is_encoder_decoder=False,
+        use_cod=True,
+        use_nlr=False,
+        description="Qwen2.5-1.5B + Chain-of-Density prompting.",
     ),
-    "bart-fact-no-cpo": ModelConfig(
-        name="bart-fact-no-cpo",
-        hf_path="facebook/bart-large-cnn",
-        max_input_length=1024,
-        max_target_length=256,
-        is_bart_fact=True,
-        is_encoder_decoder=True,
-        description="BART-FaCT w/o CPO: BART + HSE + CFA (no preference optimization)",
+    "summlens-nlr": ModelConfig(
+        name="summlens-nlr",
+        hf_path="Qwen/Qwen2.5-1.5B-Instruct",
+        max_input_length=8192,
+        max_target_length=384,
+        is_causal_lm=True,
+        is_encoder_decoder=False,
+        use_cod=False,
+        use_nlr=True,
+        description="Qwen2.5-1.5B + NLI-Rerank over 4 sampled candidates.",
     ),
-    "bart-baseline": ModelConfig(
-        name="bart-baseline",
-        hf_path="facebook/bart-large-cnn",
-        max_input_length=1024,
-        max_target_length=256,
-        is_bart_fact=False,
-        is_encoder_decoder=True,
-        description="BART baseline (no novel modules), same as bart-large-cnn",
+    "summlens-full": ModelConfig(
+        name="summlens-full",
+        hf_path="Qwen/Qwen2.5-1.5B-Instruct",
+        max_input_length=8192,
+        max_target_length=384,
+        is_causal_lm=True,
+        is_encoder_decoder=False,
+        use_cod=True,
+        use_nlr=True,
+        description="Qwen2.5-1.5B + CoD + NLR — proposed method.",
     ),
 }
 
 
-def get_bart_fact_config(model_name: str) -> BARTFaCTConfig:
-    """Map a model name to its BARTFaCTConfig (for ablation variants)."""
-    config_map = {
-        "bart-fact-full": ABLATION_CONFIGS["bart_fact_full"],
-        "bart-fact-no-hse": ABLATION_CONFIGS["bart_fact_no_hse"],
-        "bart-fact-no-cfa": ABLATION_CONFIGS["bart_fact_no_cfa"],
-        "bart-fact-no-cpo": ABLATION_CONFIGS["bart_fact_no_cpo"],
-        "bart-baseline": ABLATION_CONFIGS["bart_baseline"],
-    }
-    if model_name in config_map:
-        return copy.deepcopy(config_map[model_name])
-    raise ValueError(
-        f"Unknown BART-FaCT config: {model_name}. "
-        f"Available: {list(config_map.keys())}"
-    )
+# Default rosters used by the experiment driver.
+BASELINE_MODELS: List[str] = [
+    "bart-large-cnn",
+    "distilbart-cnn-12-6",
+    "pegasus-arxiv",
+    "led-large-arxiv",
+    "qwen2.5-1.5b",
+]
+
+ABLATION_MODELS: List[str] = [
+    "qwen2.5-1.5b",     # vanilla (no CoD, no NLR)
+    "summlens-cod",      # +CoD
+    "summlens-nlr",      # +NLR
+    "summlens-full",     # +CoD +NLR
+]
 
 
-# ── Training configuration ─────────────────────────────────────────────
+# ── Runtime config ─────────────────────────────────────────────────────
+
 
 @dataclass
-class TrainingConfig:
-    learning_rate: float = 3e-5
-    num_train_epochs: int = 3
-    per_device_train_batch_size: int = 4
-    per_device_eval_batch_size: int = 8
-    gradient_accumulation_steps: int = 2
-    warmup_steps: int = 200
-    weight_decay: float = 0.01
-    adam_epsilon: float = 1e-8
-    max_grad_norm: float = 1.0
-    fp16: bool = True
-    gradient_checkpointing: bool = False
-    logging_steps: int = 50
-    eval_steps: int = 250
-    save_steps: int = 500
-    save_total_limit: int = 3
+class RuntimeConfig:
+    """Decoding parameters shared across all models."""
+
     beam_size: int = 4
     length_penalty: float = 2.0
     no_repeat_ngram_size: int = 3
-    output_dir: str = "./results"
+    batch_size: int = 4
     seed: int = 42
-    dataset_name: str = "arxiv"
-    model_name: str = "bart-large-cnn"
-    max_samples: Optional[int] = None
+    output_dir: str = "./results"
 
 
-# ── Experiment descriptors ─────────────────────────────────────────────
-
-@dataclass
-class ContextLengthExperiment:
-    model_name: str
-    context_lengths: List[int] = field(default_factory=lambda: [256, 512, 768, 1024])
-    dataset_name: str = "arxiv"
-    max_samples: Optional[int] = 5000
+# ── Helpers ────────────────────────────────────────────────────────────
 
 
-@dataclass
-class HallucinationConfig:
-    detector_model: str = "textattack/roberta-base-STS-B"
-    similarity_threshold: float = 0.7
-    nli_model: str = "roberta-large-mnli"
-
-
-# ── Device helpers ─────────────────────────────────────────────────────
-
-def get_device():
+def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
-    elif torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
-def get_available_models():
+def get_available_models() -> List[str]:
     return list(MODEL_CONFIGS.keys())
 
 
 def get_model_config(model_name: str) -> ModelConfig:
     if model_name not in MODEL_CONFIGS:
         raise ValueError(
-            f"Unknown model: {model_name}. "
-            f"Available: {list(MODEL_CONFIGS.keys())}"
+            f"Unknown model: {model_name}. Available: {list(MODEL_CONFIGS.keys())}"
         )
     return copy.deepcopy(MODEL_CONFIGS[model_name])

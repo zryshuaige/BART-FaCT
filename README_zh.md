@@ -1,13 +1,14 @@
 <div align="center">
 
-# BART-FaCT
+# SUMM-Lens
 
-### 面向长文档摘要的事实性增强方法：层次化结构编码与校准式忠实度注意力
+### 长文档摘要的零训练推理期增强方法
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_REPO/blob/main/notebooks/run.ipynb)
+[![Open in Colab](https://img.shields.io/badge/Open%20in-Colab-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/YOUR_REPO/blob/main/notebooks/run.ipynb)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.35+-FFD21E)](https://huggingface.co/docs/transformers)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.40+-FFD21E)](https://huggingface.co/docs/transformers)
+[![HF Models](https://img.shields.io/badge/🤗%20Models-Qwen2.5%20%7C%20BART%20%7C%20PEGASUS%20%7C%20LED-blue)](https://huggingface.co/models?pipeline_tag=summarization)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -16,92 +17,64 @@
 
 ## 摘要
 
-为科学论文生成忠实摘要是困难的，原因有二，且二者相互加剧。其一，BART 等标准编码器-解码器模型将论文处理为扁平的 token 序列——摘要中的一句话和方法章节中的一句话对编码器来说并无区别，模型不知道每条信息处于论文论证结构的什么位置。其二，解码器的交叉注意力在每一步对所有编码器位置等权分配权重，模型无法判断自己是在从源文中检索某个具体结果，还是在猜测一个听上去合理的数字。上下文越长，注意力越弥散，模型就越倾向于依赖其语言模型先验进行补全，生成流畅但缺乏源文依据的内容。最大似然估计下的交叉熵损失无法区分这两种行为。
+arXiv 与 PubMed 等长文档摘要任务面临三个相互交织的难题。**（P1）训练成本。** 主流编码器-解码器基线（BART、PEGASUS、LED）参数量在 300–600M，必须针对每个数据集单独微调，这在免费算力（Colab 免费版、CPU）上并不现实。**（P2）单次生成的稀疏性。** 指令微调 LLM 在零样本下产出的摘要虽流畅，但通常 *稀疏* —— 倾向于错过关键实体、数字、跨章节的发现，因为单次前向只能在文档上"提交一次"采样轨迹。**（P3）单样本解码的不可靠。** 一份流畅的摘要可能在不被察觉的情况下偏离源文；常规的贪心/Beam 解码内部没有任何机制偏向"最忠实于源文"的候选。
 
-我们提出 **BART-FaCT**，它在一个已预训练于摘要任务的 BART 模型上增加三个轻量模块，每个模块针对一类特定的失效模式。**HSE**（层次化结构编码）学习文档的层次化表示——句子、段落、章节——并将其注入 token 嵌入，使编码器知晓每个 token 位于论文论证结构的何处。**CFA**（校准式忠实度注意力）用一个瓶颈网络包裹每层解码器交叉注意力，估计逐 token 的忠实度不确定性，并据此调节源文注意力的贡献：不确定时更仔细地回看源文。**CPO**（对比式偏好优化）以模型自身在无编码器条件下的生成作为非偏好响应，用 DPO 风格的偏好损失替代启发式负采样，直接告诉模型「有源文依据的摘要优于凭空生成的摘要」。
+本文提出 **SUMM-Lens**，**在不训练任何参数的前提下** 同时解决上述三个问题。我们以 Qwen2.5-1.5B-Instruct（Apache 2.0，2024）作为固定的现代主干，叠加两个轻量推理期模块：
 
-我们在 arXiv 和 PubMed 两个长文档摘要基准上进行了评估，与四个预训练摘要模型进行了对比，并通过五组模块消融分离了各组件的独立贡献。
+- **CoD — 链式密度提示（约 80 行）** 解决 **P2**：通过迭代地"在保持长度的前提下补全摘要中遗漏的关键实体"，把稀疏的初稿密化为信息密度更高的摘要，且过程中不更新任何梯度。
+- **NLR — NLI 重排（约 120 行）** 解决 **P3**：采样 K 条多样化候选摘要，对每条候选按句拆分并使用预训练 MNLI 模型逐句对源文做蕴含判断，最终选出"每句都最被源文蕴含"的那条，从单点估计转向忠实度感知的多候选选择。
 
----
-
-## 三个模块
-
-### HSE · 层次化结构编码
-
-科学论文天然具有层次化的组织结构——论点建立在方法之上，结果支撑结论——但 BART 将整篇论文当作一长串字符来读。此前的工作尝试用正则表达式检测章节标题（如匹配 "Introduction"）来解决这一问题，但这在不同学科间泛化性很差，也无法捕捉句子层面的篇章推进。
-
-HSE 采用了不同的思路。它先用 NLTK 的语言学句子分割器检测句子边界，再对每个句子的 token 表示做 mean-pool，用一个紧凑的 2 层 Transformer（4 头、256 维 FFN、Pre-LN、GELU）对这些句子向量进行编码，建模句子之间的逻辑关系和篇章位置。结构增强的表示通过可学习门控广播回每个 token：
-
-```
-增强嵌入 = token嵌入 + σ(W·[token嵌入 ⊕ 结构上下文]) ⊙ 结构上下文
-```
-
-此后编码器看到的就不仅是「这是第 547 号 token」，而是「这是 Methods 章节的第三句话」。模块约增加 270 万参数，仅占 BART-Large 骨架的 0.7%。
-
-> **文献依据。** Hierarchical Transformers (Liu & Lapata, EMNLP 2019); Lost in the Middle (Liu et al., TACL 2023)。
+零训练这一性质本身解决了 **P1**：所有组件即插即用、与数据集无关、可在免费 Colab 与 CPU 上运行。我们在 arXiv 与 PubMed 上评估了一个 2019→2024 的基线阶梯（BART-Large-CNN / DistilBART / PEGASUS-arXiv / LED-arXiv / Qwen2.5-Vanilla），并通过 4 配置消融（Vanilla / +CoD / +NLR / +Both）分离两个模块各自的贡献。最终我们得到了一个完全可复现、零训练成本的事实性增强摘要管线 —— 既可作为算力受限场景下的强零样本基线，也可作为任何 causal-LM 摘要器之上的"即插即用"忠实度增强模块。
 
 ---
 
-### CFA · 校准式忠实度注意力
+## 两个模块
 
-在标准解码器中，交叉注意力对编码器状态求加权平均并与自注意力输出相加。无论是正在从源文检索事实还是在生成过渡句，执行的操作完全相同。模型无法表达「我对此处不确定——我需要更仔细地看源文」。
+### CoD · 链式密度提示
 
-CFA 赋予了每个解码器层这种能力。一个小型瓶颈网络接收交叉注意力输出和自注意力状态，通过 128 维隐藏层压缩后估计每个 token 的不确定性标量。该不确定性作为加性偏置作用于忠实度门控：
+小模型一次性给出的初版摘要往往是稀疏的 —— 几句高层概括，错过实体、数字、跨章节的发现。CoD 把摘要看作一个需要被 *增稠* 的产物，而不是 *一次性生成* 的产物。从一份种子摘要出发，模型被要求重写 3 次；每一次重写必须 (a) 找到当前摘要中遗漏的 1–3 个关键实体或数字，(b) 把它们整合进摘要，同时整体长度保持基本不变。这种"长度预算"迫使模型压缩信息密度低的措辞，腾出空间给更有信息量的内容。
 
-```
-不确定性 = σ(MLP([cross_attn ⊕ self_attn]))
-门控 = σ(W·瓶颈 + 不确定性)
-输出 = 门控 ⊙ cross_attn + (1−门控) ⊙ self_attn
-```
+模块本质是一个 3 轮循环 + 一个固定提示模板，不更新任何模型权重。在 causal-LM 主干上以 chat 形式端到端运行；在 seq2seq 主干（BART/PEGASUS）上自动降级为单轮生成。
 
-当模型不确定时（注意力弥散、cross/self 差异大），门控值偏向源文——「回去看论文」。当模型自信时，门控允许更自由的表达。与原始解码器输出的 0.5–0.5 残差混合保证了训练稳定性。单层开销约 32 万参数，12 层合计约 380 万。
+> **文献依据。** Adams et al. *From Sparse to Dense: GPT-4 Summarization with the Chain of Density Prompt.* EMNLP 2023.
 
-> **文献依据。** DoLa (Chuang et al., ICLR 2024); Context-Aware Decoding (Shi et al., ACL 2024)。
+### NLR · NLI 重排
+
+单条采样得到的摘要只是一个点估计。NLR 把摘要从 generate 变成 generate-then-select：在 temperature 0.7 / top-p 0.95 下采样 4 条候选，对每条候选按句拆分，用预训练 MNLI 模型（`roberta-large-mnli`）以源文为前提、摘要中每句为假设进行打分。我们对每个候选取所有句子的"蕴含概率均值"作为忠实度分，最后返回得分最高的那条摘要。
+
+NLR 完全零样本，复用了项目中评估幻觉时已加载的同一个 NLI checkpoint —— 没有额外权重，没有微调，约 120 行代码。
+
+> **文献依据。** Laban et al. *SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization.* TACL 2022. 以及 2024 年关于忠实度感知重排的相关工作。
+
+当 CoD 和 NLR 联合使用时，NLR 采样 K 个种子，对每个种子分别跑 CoD，再在密化后的候选集合上做 NLI 重排。
 
 ---
 
-### CPO · 对比式偏好优化
+## 基线阶梯（2019 → 2024）
 
-交叉熵损失教模型挑选概率最高的 token，但它不会告诉模型摘要应当有源文依据。一个编造的数字和一个忠实转述的数字，只要都和参考措辞不同，就获得相同的损失。
+所有模型 **仅用于推理**。每个模型都通过 `AutoModel*.from_pretrained` 直接加载。
 
-此前的工作通过 InfoNCE 对比损失来缓解这一问题，但负样本是手工扰动构造的——替换实体、篡改数字、打乱句子。这些合成扰动未必反映模型真实的失效模式。CPO 用模型自身来构造负样本：偏好响应是人类参考摘要，非偏好响应是模型在编码器隐状态全为零的条件下——纯解码器，从 BOS 出发——生成的文本。这是模型完全脱离源文的语言先验。这份文本中的任何事实性内容，按构造即是幻觉。
-
-DPO 风格的偏好损失将模型拉向有源文依据的生成：
-
-```
-L_cpo = −log σ(β·[log π(y_pref|x) − log π(y_disf|x)])
-L_total = L_ce + λ·L_cpo   (λ=0.15, β=0.5)
-```
-
-投影头约增加 120 万参数。
-
-> **文献依据。** DPO (Rafailov et al., NeurIPS 2023); Model-based Preference Optimization (Gao et al., EMNLP 2024)。
+| 年份 | 模型 | HF 路径 | 参数 | 备注 |
+|:---:|:---|:---|:---:|:---|
+| 2019 | BART-Large-CNN | `facebook/bart-large-cnn` | 400M | seq2seq 基线 |
+| 2020 | DistilBART-CNN | `sshleifer/distilbart-cnn-12-6` | 306M | 蒸馏版，推理快 |
+| 2020 | PEGASUS-arXiv | `google/pegasus-arxiv` | 568M | arXiv 专用 |
+| 2020 | LED-arXiv | `allenai/led-large-16384-arxiv` | 460M | 长文档专用 |
+| **2024** | **Qwen2.5-1.5B-Instruct** | `Qwen/Qwen2.5-1.5B-Instruct` | 1.5B | 现代零样本基线 |
+| **本文** | Qwen2.5 + CoD + NLR | — | 1.5B | 推理期增强 |
 
 ---
 
 ## 消融设计
 
-| 配置 | HSE | CFA | CPO | 所回答的问题 |
-|:---|:---:|:---:|:---:|:---|
-| BART-Large-CNN | ✗ | ✗ | ✗ | 预训练摘要模型在无增强时的基线水平 |
-| w/o HSE | ✗ | ✓ | ✓ | 结构编码能否在忠実度模块之上提供额外增益？ |
-| w/o CFA | ✓ | ✗ | ✓ | 校准式注意力能否进一步降低幻觉？ |
-| w/o CPO | ✓ | ✓ | ✗ | 偏好优化能否进一步提升事实性？ |
-| **完整模型** | **✓** | **✓** | **✓** | 三者是否互补？ |
+四个消融配置共享同一个 2024 年主干（`Qwen/Qwen2.5-1.5B-Instruct`），仅推理期管线不同。
 
----
-
-## 对比模型
-
-所有对比模型均为预训练好的摘要模型，可直接用于推理。
-
-| 模型 | 来源 | 参数 |
-|:---|:---|:---:|
-| BART-Large-CNN | `facebook/bart-large-cnn` | 400M |
-| PEGASUS-arXiv | `google/pegasus-arxiv` | 568M |
-| PEGASUS-CNN/DM | `google/pegasus-cnn_dailymail` | 568M |
-| DistilBART-CNN-12-6 | `sshleifer/distilbart-cnn-12-6` | 306M |
-| **BART-FaCT** | 本文 | **~403M** |
+| 配置 | CoD | NLR | 所回答的问题 |
+|:---|:---:|:---:|:---|
+| Qwen2.5-Vanilla | ✗ | ✗ | 2024 LLM 在零样本下能达到什么水平？ |
+| + CoD | ✓ | ✗ | 单独使用迭代密化是否有帮助？ |
+| + NLR | ✗ | ✓ | 单独使用 NLI 候选选择是否有帮助？ |
+| **+ CoD + NLR** | **✓** | **✓** | 两个模块是否互补？ |
 
 ---
 
@@ -111,27 +84,62 @@ L_total = L_ce + λ·L_cpo   (λ=0.15, β=0.5)
 git clone <repo-url> && cd end
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 冒烟测试
+# 冒烟测试（5 个样本、3 个模型、不算 BERTScore/METEOR —— CPU 几分钟即可）
 python src/run_experiments.py --mode quick_test --dataset arxiv
 
-# 多模型对比
-python src/run_experiments.py --mode exp1 --dataset arxiv \
-    --models "bart-large-cnn,pegasus-arxiv,pegasus-cnn_dailymail,distilbart-cnn-12-6" \
-    --max_samples 1000 --num_test 100
+# 完整 baseline 阶梯
+python src/run_experiments.py --mode baseline --dataset arxiv --num_test 100
 
-# 模块消融
-python src/run_experiments.py --mode ablation --ablation_type all
+# 仅模块消融
+python src/run_experiments.py --mode ablation --dataset arxiv --num_test 100
+
+# 全部 + 出图
+python src/run_experiments.py --mode all --dataset arxiv --num_test 100
+```
+
+`notebooks/run.ipynb` 兼容 Colab，包含数据集预览 → 基线 → 消融 → 出图的完整流程。
+
+---
+
+## 架构
+
+```
+                    ┌──────────────────────────────┐
+   长文档    ──────► │  Qwen2.5-1.5B-Instruct       │ ── 种子摘要 ──┐
+                    │  (零样本、chat 模板)         │               │
+                    └──────────────────────────────┘               │
+                                                                   ▼
+                                  ┌──────── Chain-of-Density ─────┐
+                                  │  iter 1: 补 1-3 个遗漏实体    │
+                                  │           保持长度不变        │
+                                  │  iter 2: 同上                 │
+                                  │  iter 3: 同上                 │
+                                  └─────────────┬─────────────────┘
+                                                │ K 条密化后的候选
+                                                ▼
+                                  ┌──────── NLI-Rerank ────────────┐
+                                  │  对每个候选:                   │
+                                  │    拆句 → sentence              │
+                                  │    NLI(article, sentence)       │
+                                  │    score = mean P(entail)       │
+                                  │  返回 argmax                    │
+                                  └─────────────┬───────────────────┘
+                                                │
+                                                ▼
+                                          最终摘要
 ```
 
 ---
 
 ## 评估指标
 
-**质量：** ROUGE-1/2/L/Lsum, BERTScore F1, METEOR
+**质量：** ROUGE-1/2/L/Lsum、BERTScore F1、METEOR
 
-**事实性：** NLI 蕴含率 (RoBERTa-large-MNLI), 幻觉率 (内在/外在/矛盾), n-gram 重叠率
+**忠实度：** NLI 蕴含率（RoBERTa-large-MNLI），逐候选的蕴含分
 
-**辅助：** 压缩比, JS 散度, 4-gram 重复率
+**辅助：** JS 散度（n-gram）、4-gram 重复率、压缩比、新颖度
+
+所有指标由 `src/benchmark.py` 计算，忠实度由 `src/hallucination.py` 计算（与 NLR 共用同一份 NLI 模型）。
 
 ---
 
@@ -140,38 +148,43 @@ python src/run_experiments.py --mode ablation --ablation_type all
 ```
 end/
 ├── src/
-│   ├── models/
-│   │   ├── bart_fact.py              # 主模型与配置
-│   │   ├── hierarchical_structure.py # HSE 模块
-│   │   ├── calibrated_attention.py   # CFA 模块
-│   │   └── preference_loss.py        # CPO 模块
-│   ├── config.py / data_utils.py
-│   ├── train.py / evaluate.py / benchmark.py
-│   ├── hallucination.py / ablation.py / sensitivity.py
-│   ├── analyze.py / visualization.py
-│   └── run_experiments.py
+│   ├── methods/                # ★ 推理期模块（零训练）
+│   │   ├── llm_summarizer.py   #   seq2seq / causal-LM 统一封装
+│   │   ├── cod.py              #   Chain-of-Density（~80 行）
+│   │   ├── nli_rerank.py       #   NLI 重排（~120 行）
+│   │   └── prompts.py          #   各数据集的提示模板
+│   ├── config.py               # 模型注册表与运行配置
+│   ├── data_utils.py           # arXiv / PubMed 加载器、HF 镜像
+│   ├── evaluate.py             # 单模型推理 + 评估
+│   ├── benchmark.py            # ROUGE / BERTScore / METEOR / JS / ...
+│   ├── hallucination.py        # NLI 幻觉检测器（与 NLR 共用）
+│   ├── analyze.py              # 出图 + LaTeX 表（中文字体感知）
+│   ├── visualization.py        # notebook 辅助函数
+│   └── run_experiments.py      # 顶层 CLI
 ├── notebooks/
-│   ├── run.ipynb          # 实验运行 (兼容 Colab)
-│   └── preview.ipynb      # 模块可视化演示
-├── data/ / results/
-└── README.md / README_zh.md / EXPERIMENT_PLAN.md
+│   └── run.ipynb               # Colab / VSCode 完整 walkthrough
+├── data/
+│   ├── arxiv/                  # 已缓存的 HF 数据集
+│   └── pubmed/
+├── results/                    # 评估输出（每模型 JSON + 图表）
+├── requirements.txt
+├── README.md / README_zh.md / 论文.md
+└── EXPERIMENT_PLAN.md
 ```
 
 ---
 
 ## 参考文献
 
-1. Liu & Lapata. "Hierarchical Transformers for Long Document Summarization." *EMNLP*, 2019.
-2. Chuang et al. "DoLa: Decoding by Contrasting Layers Improves Factuality." *ICLR*, 2024.
-3. Rafailov et al. "Direct Preference Optimization." *NeurIPS*, 2023.
-4. Shi et al. "Context-Aware Decoding for Faithful Summarization." *ACL*, 2024.
-5. Gao et al. "Model-based Preference Optimization in Summarization without Human Feedback." *EMNLP*, 2024.
-6. Liu et al. "Lost in the Middle: How Language Models Use Long Contexts." *TACL*, 2023.
-7. Lewis et al. "BART: Denoising Sequence-to-Sequence Pre-training." *ACL*, 2020.
-8. Zhang et al. "PEGASUS: Pre-training with Extracted Gap-sentences." *ICML*, 2020.
+1. Adams G, et al. *From Sparse to Dense: GPT-4 Summarization with the Chain of Density Prompt.* EMNLP 2023.
+2. Laban P, et al. *SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization.* TACL 2022.
+3. Qwen Team. *Qwen2.5 Technical Report.* 2024.
+4. Lewis M, et al. *BART: Denoising Sequence-to-Sequence Pre-training.* ACL 2020.
+5. Zhang J, et al. *PEGASUS: Pre-training with Extracted Gap-sentences for Abstractive Summarization.* ICML 2020.
+6. Beltagy I, et al. *Longformer: The Long-Document Transformer.* arXiv:2004.05150, 2020.
 
 ---
 
 ## 许可证
 
-MIT。预训练模型遵循 HuggingFace 各自许可证。
+SUMM-Lens 代码采用 MIT 许可证。预训练模型遵循其各自的 HuggingFace 许可证（Qwen2.5 为 Apache 2.0；BART/PEGASUS/LED 为各自的研究许可）。

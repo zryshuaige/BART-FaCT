@@ -1,13 +1,14 @@
 <div align="center">
 
-# BART-FaCT
+# SUMM-Lens
 
-### Faithfulness-Enhanced Long-Document Summarization via<br>Hierarchical Structure Encoding & Calibrated Faithfulness Attention
+### Zero-Training Inference-Time Enhancements for<br>Long-Document Summarization
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_REPO/blob/main/notebooks/run.ipynb)
+[![Open in Colab](https://img.shields.io/badge/Open%20in-Colab-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/YOUR_REPO/blob/main/notebooks/run.ipynb)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.35+-FFD21E)](https://huggingface.co/docs/transformers)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Transformers](https://img.shields.io/badge/🤗%20Transformers-4.40+-FFD21E)](https://huggingface.co/docs/transformers)
+[![HF Models](https://img.shields.io/badge/🤗%20Models-Qwen2.5%20%7C%20BART%20%7C%20PEGASUS%20%7C%20LED-blue)](https://huggingface.co/models?pipeline_tag=summarization)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -16,92 +17,64 @@
 
 ## Abstract
 
-Generating faithful summaries of long scientific documents is difficult for two reasons that compound each other. First, standard encoder-decoder models like BART process papers as flat token sequences. A sentence in the Abstract and a sentence in the Methods look identical to the encoder — there is no signal about where a fact sits within the document's argument. Second, at each decoding step, cross-attention distributes weight across all encoder positions uniformly. The model cannot tell whether it is retrieving a specific result from the source or guessing a plausible-sounding number. When the context is long and attention becomes diffuse, the model defaults to its language-model prior and produces fluent but unsupported statements. Maximum-likelihood training with cross-entropy loss does not distinguish between these two behaviors.
+Long-document summarization on arXiv and PubMed faces three intertwined difficulties. **(P1) Training cost.** Mainstream encoder-decoder baselines (BART, PEGASUS, LED) require per-dataset fine-tuning at the 300–600M parameter scale, which is impractical on free-tier compute. **(P2) Sparsity of single-pass generation.** Zero-shot summaries from instruction-tuned LLMs are fluent but *sparse* — they tend to miss key entities, numbers, and cross-section findings, because a single forward pass commits to one trajectory through the document. **(P3) Unreliability of single-sample decoding.** A fluent summary may quietly diverge from the source; standard greedy or beam decoding has no internal mechanism to prefer the most source-faithful candidate among several plausible ones.
 
-We introduce **BART-FaCT**, which augments a summarization-pretrained BART checkpoint with three lightweight modules, each targeting one of these failure modes. **HSE** (Hierarchical Structure Encoding) learns a hierarchical representation of the document — sentence, paragraph, section — and injects it back into token embeddings so the encoder knows where every token belongs in the paper's rhetorical structure. **CFA** (Calibrated Faithfulness Attention) wraps each decoder cross-attention layer with a bottleneck network that estimates per-token faithfulness uncertainty and adjusts the source-attention contribution accordingly: uncertain tokens attend harder to the source. **CPO** (Contrastive Preference Optimization) replaces heuristic negative sampling with a DPO-style preference loss where the dispreferred response is the model's own generation without encoder context — the summary it would produce if it ignored the paper entirely.
+We propose **SUMM-Lens**, a framework that targets all three problems **without training a single parameter**. With Qwen2.5-1.5B-Instruct (Apache 2.0, 2024) as a fixed modern backbone, we add two lightweight inference-time modules:
 
-We evaluate on the arXiv and PubMed long-document summarization benchmarks, comparing against four pre-trained summarization models and isolating each module's contribution through a five-configuration ablation.
+- **CoD — Chain-of-Density prompting (≈ 80 lines)** addresses **P2**: it iteratively rewrites the summary to incorporate previously-missed entities while preserving length, turning a sparse first draft into a denser one without any gradient update.
+- **NLR — NLI-Rerank (≈ 120 lines)** addresses **P3**: it samples K diverse candidates and selects the one whose every sentence is most entailed by the source under a pretrained MNLI model, replacing a single point estimate with a faithfulness-aware selection step.
 
----
-
-## Three Modules
-
-### HSE · Hierarchical Structure Encoding
-
-Scientific papers are organized hierarchically — claims build on methods, results support conclusions — but BART reads them as one long string. Prior attempts to fix this use regular expressions to detect section headers like "Introduction", which works poorly across disciplines and captures nothing about sentence-to-sentence discourse flow.
-
-HSE takes a different approach. It first detects sentence boundaries using NLTK's linguistically-motivated segmenter, then mean-pools each sentence's token representations. A compact 2-layer Transformer (4 heads, 256-dim FFN, Pre-LN, GELU) processes these sentence vectors, modeling how sentences relate to each other and where they sit in the document's argument. The resulting structure-enriched representation is broadcast back to every token through a learned gate:
-
-```
-enriched = token_emb + σ(W·[token_emb ⊕ structure_context]) ⊙ structure_context
-```
-
-The encoder then sees not just "this is token 547" but "this is the third sentence of the Methods section." The module adds ~2.7M parameters — roughly 0.7% of the BART-Large backbone.
-
-> **Inspiration.** Hierarchical Transformers (Liu & Lapata, EMNLP 2019); Lost in the Middle (Liu et al., TACL 2023).
+The zero-training property itself addresses **P1**: every component is a plug-in, dataset-agnostic, and runnable on free Colab or CPU. We benchmark a 2019→2024 baseline ladder (BART-Large-CNN / DistilBART / PEGASUS-arXiv / LED-arXiv / Qwen2.5-Vanilla) on arXiv and PubMed, and run a four-configuration ablation (Vanilla, +CoD, +NLR, +Both) to isolate each module's contribution. The result is a fully reproducible faithful-summarization pipeline with no training cost — useful both as a strong zero-shot baseline for compute-constrained research and as a drop-in faithfulness booster for any causal-LM summarizer.
 
 ---
 
-### CFA · Calibrated Faithfulness Attention
+## Two Modules
 
-In a standard decoder, cross-attention computes a weighted average of encoder states and adds it to the self-attention output. The same operation runs whether the model is looking up a fact or smoothing a transition. The model has no way to say "I am uncertain here — I should check the source more carefully."
+### CoD · Chain-of-Density Prompting
 
-CFA gives each decoder layer this ability. A small bottleneck network takes the cross-attention output and the self-attention state, compresses them through a 128-dimensional hidden layer, and estimates a scalar uncertainty per token. This uncertainty acts as an additive bias on a faithfulness gate:
+Vanilla summarization with a small LLM tends to produce a sparse first draft — a few high-level sentences that miss entities, numbers, and cross-section findings. CoD treats the summary as something to *densify*, not just to *generate*. Starting from a single seed summary, the model is asked to rewrite it 3 times; each rewrite must (a) identify 1–3 informative entities or numbers from the article that are *missing* from the current summary, and (b) integrate them while keeping the overall length essentially constant. The rewrite-budget forces compression of less informative phrasing as denser content is added.
 
-```
-uncertainty = σ(MLP([cross_attn ⊕ self_attn]))
-gate = σ(W·bottleneck + uncertainty)
-output = gate ⊙ cross_attn + (1−gate) ⊙ self_attn
-```
+The module is a 3-pass loop over a fixed prompt template; no model weights are updated. On causal-LM backbones it runs end-to-end in chat format. On seq2seq backbones (BART/PEGASUS) it gracefully degrades to a single-pass generation.
 
-When the model is uncertain (diffuse attention, large cross-self discrepancy), the gate pushes toward the source — "go look at the paper." When the model is confident, the gate allows it to generate more freely. A 0.5–0.5 residual blend with the original decoder output keeps training stable. Per-layer overhead is ~320K, totaling ~3.8M across 12 layers.
+> **Inspiration.** Adams et al. *From Sparse to Dense: GPT-4 Summarization with the Chain of Density Prompt.* EMNLP 2023.
 
-> **Inspiration.** DoLa (Chuang et al., ICLR 2024); Context-Aware Decoding (Shi et al., ACL 2024).
+### NLR · NLI-Rerank
+
+A single-sample summary is a single point estimate. NLR turns summarization into a generate-then-select pipeline: 4 candidates are sampled at temperature 0.7 / top-p 0.95, then each candidate is split into sentences and scored against the source via a pretrained MNLI model (`roberta-large-mnli`). Each sentence becomes a hypothesis whose premise is a head-tail truncation of the article; we average per-sentence entailment probability to score the candidate, then return the maximum-scoring summary.
+
+NLR is purely zero-shot and reuses the same NLI checkpoint already loaded by the hallucination evaluation module — no additional weights, no fine-tuning, ~120 lines.
+
+> **Inspiration.** Laban et al. *SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization.* TACL 2022. Plus 2024-era generate-then-rerank work for faithfulness.
+
+When CoD and NLR compose, NLR samples K seeds, runs CoD on each, and then NLI-reranks the densified set.
 
 ---
 
-### CPO · Contrastive Preference Optimization
+## Baseline Ladder (2019 → 2024)
 
-Cross-entropy loss teaches the model to pick likely tokens. It does not teach the model that a summary should be grounded in the source. A hallucinated number and a faithfully copied one receive the same loss if both differ from the reference phrasing.
+All entries are **inference-only**. Every model loads via `AutoModel*.from_pretrained`.
 
-Prior work adds contrastive objectives with heuristically perturbed negatives — swap entities, change numbers, shuffle sentences. But these synthetic perturbations may not resemble how the model actually fails. CPO constructs negatives from the model itself. The *preferred* response is the human-written reference. The *dispreferred* response is what the model generates with zero-valued encoder states — decoder-only, starting from BOS. This is the model's ungrounded prior. Any factual content in it is, by construction, hallucinated.
-
-A DPO-style preference loss then pulls the model toward grounded generation:
-
-```
-L_cpo = −log σ(β·[log π(y_pref|x) − log π(y_disf|x)])
-L_total = L_ce + λ·L_cpo   (λ=0.15, β=0.5)
-```
-
-The projection head adds ~1.2M parameters.
-
-> **Inspiration.** DPO (Rafailov et al., NeurIPS 2023); Model-based Preference Optimization (Gao et al., EMNLP 2024).
+| Year | Model | HF Path | Params | Notes |
+|:---:|:---|:---|:---:|:---|
+| 2019 | BART-Large-CNN | `facebook/bart-large-cnn` | 400M | Seq2seq baseline |
+| 2020 | DistilBART-CNN | `sshleifer/distilbart-cnn-12-6` | 306M | Distilled, fast |
+| 2020 | PEGASUS-arXiv | `google/pegasus-arxiv` | 568M | arXiv-specific |
+| 2020 | LED-arXiv | `allenai/led-large-16384-arxiv` | 460M | Long-document encoder |
+| **2024** | **Qwen2.5-1.5B-Instruct** | `Qwen/Qwen2.5-1.5B-Instruct` | 1.5B | Modern zero-shot baseline |
+| **Ours** | Qwen2.5 + CoD + NLR | — | 1.5B | Inference-time enhanced |
 
 ---
 
 ## Ablation Design
 
-| Configuration | HSE | CFA | CPO | Question |
-|:---|:---:|:---:|:---:|:---|
-| BART-Large-CNN | ✗ | ✗ | ✗ | Baseline: pre-trained summarization model with no enhancements |
-| w/o HSE | ✗ | ✓ | ✓ | Does structure encoding help beyond faithfulness modules? |
-| w/o CFA | ✓ | ✗ | ✓ | Does calibrated attention reduce hallucination further? |
-| w/o CPO | ✓ | ✓ | ✗ | Does preference optimization improve factuality further? |
-| **Full** | **✓** | **✓** | **✓** | Are the three contributions complementary? |
+The four ablation configurations all share the same 2024 backbone (`Qwen/Qwen2.5-1.5B-Instruct`); only the inference-time pipeline changes.
 
----
-
-## Models Compared
-
-All comparison models are pre-trained for summarization and run inference directly.
-
-| Model | Source | Params |
-|:---|:---|:---:|
-| BART-Large-CNN | `facebook/bart-large-cnn` | 400M |
-| PEGASUS-arXiv | `google/pegasus-arxiv` | 568M |
-| PEGASUS-CNN/DM | `google/pegasus-cnn_dailymail` | 568M |
-| DistilBART-CNN-12-6 | `sshleifer/distilbart-cnn-12-6` | 306M |
-| **BART-FaCT** | this work | **~403M** |
+| Configuration | CoD | NLR | Question |
+|:---|:---:|:---:|:---|
+| Qwen2.5-Vanilla | ✗ | ✗ | What does a 2024 LLM achieve zero-shot? |
+| + CoD | ✓ | ✗ | Does iterative densification help alone? |
+| + NLR | ✗ | ✓ | Does NLI-based candidate selection help alone? |
+| **+ CoD + NLR** | **✓** | **✓** | Are the two modules complementary? |
 
 ---
 
@@ -111,45 +84,49 @@ All comparison models are pre-trained for summarization and run inference direct
 git clone <repo-url> && cd end
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# Smoke test
+# Smoke test (5 samples, 3 models, no BERTScore/METEOR — runs on CPU in minutes)
 python src/run_experiments.py --mode quick_test --dataset arxiv
 
-# Full comparison
-python src/run_experiments.py --mode exp1 --dataset arxiv \
-    --models "bart-large-cnn,pegasus-arxiv,pegasus-cnn_dailymail,distilbart-cnn-12-6" \
-    --max_samples 1000 --num_test 100
+# Full baseline ladder
+python src/run_experiments.py --mode baseline --dataset arxiv --num_test 100
 
-# Ablation
-python src/run_experiments.py --mode ablation --ablation_type all
+# Module ablation only
+python src/run_experiments.py --mode ablation --dataset arxiv --num_test 100
+
+# Everything + figures
+python src/run_experiments.py --mode all --dataset arxiv --num_test 100
 ```
+
+The `notebooks/run.ipynb` notebook is Colab-compatible and walks through dataset preview, baseline runs, ablation, and figure generation.
 
 ---
 
 ## Architecture
 
 ```
-Document
-    │
-    ▼
-┌─ HSE ──────────────────────────────────────────┐
-│  sentences → 2-layer Transformer → gate ⊙ broadcast  │
-└────────────────┬────────────────────────────────┘
-                 ▼
-┌─ BART Encoder (12 layers) ─────────────────────┐
-└────────────────┬────────────────────────────────┘
-                 ▼
-┌─ BART Decoder (12 layers, each with CFA) ──────┐
-│  Self-Attn → Cross-Attn                        │
-│  CFA: uncertainty → gate modulates cross-attn   │
-│  → FFN + LayerNorm                              │
-└────────────────┬────────────────────────────────┘
-                 │
-         ┌───────┴────────┐
-         ▼                ▼
-      L_ce (MLE)    L_cpo (preference)
-         └───────┬────────┘
-                 ▼
-        L_total = L_ce + λ·L_cpo
+                    ┌──────────────────────────────┐
+   long article ──► │  Qwen2.5-1.5B-Instruct       │ ── seed summary ──┐
+                    │  (zero-shot, chat template)  │                   │
+                    └──────────────────────────────┘                   │
+                                                                       ▼
+                                       ┌──────── Chain-of-Density ────┐
+                                       │  iter 1: add 1-3 missed       │
+                                       │           entities, keep len  │
+                                       │  iter 2: ditto                │
+                                       │  iter 3: ditto                │
+                                       └─────────────┬─────────────────┘
+                                                     │ K densified candidates
+                                                     ▼
+                                       ┌──────── NLI-Rerank ──────────┐
+                                       │  for each candidate:          │
+                                       │    split → sentences          │
+                                       │    NLI(article, sentence)     │
+                                       │    score = mean P(entail)     │
+                                       │  return argmax                │
+                                       └─────────────┬─────────────────┘
+                                                     │
+                                                     ▼
+                                                final summary
 ```
 
 ---
@@ -158,9 +135,11 @@ Document
 
 **Quality:** ROUGE-1/2/L/Lsum, BERTScore F1, METEOR
 
-**Factuality:** NLI Entailment Ratio (RoBERTa-large-MNLI), Hallucination Rate (intrinsic / extrinsic / contradiction), n-gram Overlap
+**Faithfulness:** NLI Entailment Ratio (RoBERTa-large-MNLI), per-candidate entailment score
 
-**Auxiliary:** Compression Ratio, JS Divergence, 4-gram Repetition Ratio
+**Auxiliary:** JS Divergence (n-gram), 4-gram repetition ratio, compression ratio, novelty ratio
+
+All metrics are computed by `src/benchmark.py`; faithfulness via `src/hallucination.py` (shared with NLR).
 
 ---
 
@@ -169,38 +148,43 @@ Document
 ```
 end/
 ├── src/
-│   ├── models/
-│   │   ├── bart_fact.py              # Main model & config
-│   │   ├── hierarchical_structure.py # HSE module
-│   │   ├── calibrated_attention.py   # CFA module
-│   │   └── preference_loss.py        # CPO module
-│   ├── config.py / data_utils.py
-│   ├── train.py / evaluate.py / benchmark.py
-│   ├── hallucination.py / ablation.py / sensitivity.py
-│   ├── analyze.py / visualization.py
-│   └── run_experiments.py
+│   ├── methods/                # ★ inference-time modules (zero training)
+│   │   ├── llm_summarizer.py   #   unified seq2seq / causal-LM wrapper
+│   │   ├── cod.py              #   Chain-of-Density (~80 lines)
+│   │   ├── nli_rerank.py       #   NLI rerank (~120 lines)
+│   │   └── prompts.py          #   per-dataset templates
+│   ├── config.py               # model registry + runtime config
+│   ├── data_utils.py           # arXiv / PubMed loaders, HF mirror
+│   ├── evaluate.py             # per-model inference + metrics
+│   ├── benchmark.py            # ROUGE / BERTScore / METEOR / JS / ...
+│   ├── hallucination.py        # NLI-based hallucination detector (shared)
+│   ├── analyze.py              # figures + LaTeX tables (CJK-aware fonts)
+│   ├── visualization.py        # notebook helpers
+│   └── run_experiments.py      # top-level CLI
 ├── notebooks/
-│   ├── run.ipynb          # Experiment runner (Colab-compatible)
-│   └── preview.ipynb      # Module visualization & demo
-├── data/ / results/
-└── README.md / README_zh.md / EXPERIMENT_PLAN.md
+│   └── run.ipynb               # Colab / VSCode walkthrough
+├── data/
+│   ├── arxiv/                  # cached HF dataset
+│   └── pubmed/
+├── results/                    # eval outputs (per-model JSON + figures)
+├── requirements.txt
+├── README.md / README_zh.md / 论文.md
+└── EXPERIMENT_PLAN.md
 ```
 
 ---
 
 ## References
 
-1. Liu & Lapata. "Hierarchical Transformers for Long Document Summarization." *EMNLP*, 2019.
-2. Chuang et al. "DoLa: Decoding by Contrasting Layers Improves Factuality." *ICLR*, 2024.
-3. Rafailov et al. "Direct Preference Optimization." *NeurIPS*, 2023.
-4. Shi et al. "Context-Aware Decoding for Faithful Summarization." *ACL*, 2024.
-5. Gao et al. "Model-based Preference Optimization in Summarization without Human Feedback." *EMNLP*, 2024.
-6. Liu et al. "Lost in the Middle: How Language Models Use Long Contexts." *TACL*, 2023.
-7. Lewis et al. "BART: Denoising Sequence-to-Sequence Pre-training." *ACL*, 2020.
-8. Zhang et al. "PEGASUS: Pre-training with Extracted Gap-sentences." *ICML*, 2020.
+1. Adams G, et al. *From Sparse to Dense: GPT-4 Summarization with the Chain of Density Prompt.* EMNLP 2023.
+2. Laban P, et al. *SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization.* TACL 2022.
+3. Qwen Team. *Qwen2.5 Technical Report.* 2024.
+4. Lewis M, et al. *BART: Denoising Sequence-to-Sequence Pre-training.* ACL 2020.
+5. Zhang J, et al. *PEGASUS: Pre-training with Extracted Gap-sentences for Abstractive Summarization.* ICML 2020.
+6. Beltagy I, et al. *Longformer: The Long-Document Transformer.* arXiv:2004.05150, 2020.
 
 ---
 
 ## License
 
-MIT. Pre-trained models under their respective HuggingFace licenses.
+MIT for SUMM-Lens code. Pre-trained models follow their respective HuggingFace licenses (Apache 2.0 for Qwen2.5; permissive research licenses for BART/PEGASUS/LED).

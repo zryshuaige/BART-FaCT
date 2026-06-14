@@ -1,10 +1,17 @@
+"""Dataset loaders for arXiv and PubMed long-document summarization.
+
+Uses HuggingFace datasets with a Chinese mirror by default. Local on-disk caches
+under ``data/<name>/`` are reused if present.
+"""
+
 import os
-import re
 import random
+
 import numpy as np
 import torch
 
-# Force HuggingFace mirror for users in China
+# Force HuggingFace mirror for users in mainland China — set BEFORE the datasets
+# import so the mirror takes effect at module load time.
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HUGGINGFACE_HUB_TIMEOUT", "120")
 
@@ -19,15 +26,12 @@ if hasattr(huggingface_hub, "constants"):
 if hasattr(huggingface_hub, "HF_ENDPOINT"):
     huggingface_hub.HF_ENDPOINT = os.environ["HF_ENDPOINT"]
 
-from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer
-
-from models.section_embedding import SectionDetector
+from datasets import DatasetDict, load_dataset
 
 SEED = 42
 
 
-def set_seed(seed=SEED):
+def set_seed(seed: int = SEED) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,7 +39,7 @@ def set_seed(seed=SEED):
         torch.cuda.manual_seed_all(seed)
 
 
-def _ensure_mirror():
+def _ensure_mirror() -> None:
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     os.environ["HUGGINGFACE_HUB_TIMEOUT"] = "120"
     datasets.config.HF_ENDPOINT = "https://hf-mirror.com"
@@ -45,7 +49,7 @@ def _ensure_mirror():
         huggingface_hub.HF_ENDPOINT = "https://hf-mirror.com"
 
 
-def _get_local_data_dir(dataset_name):
+def _local_dir(dataset_name: str) -> str:
     return os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "data",
@@ -53,177 +57,66 @@ def _get_local_data_dir(dataset_name):
     )
 
 
-# ── Dataset loaders ────────────────────────────────────────────────────
+def _load_or_download(name: str, hf_path: str, max_samples=None, val_ratio=0.1):
+    local = _local_dir(name)
+    if os.path.exists(os.path.join(local, "dataset_dict.json")):
+        ds = DatasetDict.load_from_disk(local)
+    else:
+        _ensure_mirror()
+        ds = load_dataset(hf_path)
+        os.makedirs(local, exist_ok=True)
+        ds.save_to_disk(local)
+
+    if max_samples and len(ds["train"]) > max_samples:
+        ds["train"] = ds["train"].shuffle(seed=SEED).select(range(max_samples))
+        val_size = max(1, int(len(ds["train"]) * val_ratio))
+        if val_size < len(ds["train"]):
+            split = ds["train"].train_test_split(test_size=val_size, seed=SEED)
+            test_split = ds.get(
+                "test", ds.get("validation", split["test"])
+            )
+            ds = DatasetDict(
+                {
+                    "train": split["train"],
+                    "validation": split["test"],
+                    "test": test_split,
+                }
+            )
+    return ds
 
 
 def load_arxiv_dataset(max_samples=None, val_ratio=0.1):
-    """Load arXiv summarization dataset with local caching."""
-    local_dir = _get_local_data_dir("arxiv")
-    if os.path.exists(os.path.join(local_dir, "dataset_dict.json")):
-        ds = DatasetDict.load_from_disk(local_dir)
-    else:
-        _ensure_mirror()
-        ds = load_dataset("ccdv/arxiv-summarization")
-        os.makedirs(local_dir, exist_ok=True)
-        ds.save_to_disk(local_dir)
-
-    if max_samples:
-        if len(ds["train"]) > max_samples:
-            ds["train"] = ds["train"].shuffle(seed=SEED).select(range(max_samples))
-        val_size = max(1, int(len(ds["train"]) * val_ratio))
-        if val_size < len(ds["train"]):
-            split = ds["train"].train_test_split(test_size=val_size, seed=SEED)
-            ds = DatasetDict(
-                {
-                    "train": split["train"],
-                    "validation": split["test"],
-                    "test": ds.get(
-                        "validation", ds["test"] if "test" in ds else split["test"]
-                    ),
-                }
-            )
-        else:
-            ds["validation"] = ds["train"]
-    return ds
+    """Load the arXiv long-document summarization dataset."""
+    return _load_or_download(
+        "arxiv", "ccdv/arxiv-summarization", max_samples, val_ratio
+    )
 
 
 def load_pubmed_dataset(max_samples=None, val_ratio=0.1):
-    """Load PubMed summarization dataset with local caching."""
-    local_dir = _get_local_data_dir("pubmed")
-    if os.path.exists(os.path.join(local_dir, "dataset_dict.json")):
-        ds = DatasetDict.load_from_disk(local_dir)
-    else:
-        _ensure_mirror()
-        ds = load_dataset("ccdv/pubmed-summarization")
-        os.makedirs(local_dir, exist_ok=True)
-        ds.save_to_disk(local_dir)
-
-    if max_samples:
-        if len(ds["train"]) > max_samples:
-            ds["train"] = ds["train"].shuffle(seed=SEED).select(range(max_samples))
-        val_size = max(1, int(len(ds["train"]) * val_ratio))
-        if val_size < len(ds["train"]):
-            split = ds["train"].train_test_split(test_size=val_size, seed=SEED)
-            ds = DatasetDict(
-                {
-                    "train": split["train"],
-                    "validation": split["test"],
-                    "test": ds.get(
-                        "validation", ds["test"] if "test" in ds else split["test"]
-                    ),
-                }
-            )
-        else:
-            ds["validation"] = ds["train"]
-    return ds
-
-
-# ── Preprocessing ──────────────────────────────────────────────────────
-
-
-def prepare_dataset_for_model(
-    dataset_name="arxiv",
-    tokenizer=None,
-    max_input_length=1024,
-    max_target_length=256,
-    max_samples=None,
-    is_bart_fact=False,
-):
-    """Tokenize and prepare a dataset for a given model."""
-    if dataset_name == "arxiv":
-        ds = load_arxiv_dataset(max_samples=max_samples)
-        input_field = "article"
-        target_field = "abstract"
-    elif dataset_name == "pubmed":
-        ds = load_pubmed_dataset(max_samples=max_samples)
-        input_field = "article"
-        target_field = "abstract"
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    def _preprocess(examples):
-        inputs = (
-            examples[input_field]
-            if isinstance(examples[input_field], list)
-            else [examples[input_field]]
-        )
-        targets = (
-            examples[target_field]
-            if isinstance(examples[target_field], list)
-            else [examples[target_field]]
-        )
-
-        model_inputs = tokenizer(
-            inputs,
-            max_length=max_input_length,
-            truncation=True,
-            padding=False,
-        )
-
-        labels = tokenizer(
-            text_target=targets,
-            max_length=max_target_length,
-            truncation=True,
-            padding=False,
-        )
-
-        model_inputs["labels"] = labels["input_ids"]
-
-        # For BART-FaCT: compute boundary_mask (HSE) per sample
-        if is_bart_fact:
-            from models.hierarchical_structure import detect_sentence_boundaries
-            boundary_masks = []
-            for text in inputs:
-                bm = detect_sentence_boundaries(text, tokenizer, max_input_length)
-                boundary_masks.append(bm.squeeze(0).tolist())
-            model_inputs["boundary_mask"] = boundary_masks
-            model_inputs["input_texts"] = inputs
-
-        return model_inputs
-
-    remove_cols = ds["train"].column_names
-    ds = ds.map(
-        _preprocess,
-        batched=True,
-        remove_columns=remove_cols,
-        desc=f"Tokenizing {dataset_name}",
+    """Load the PubMed long-document summarization dataset."""
+    return _load_or_download(
+        "pubmed", "ccdv/pubmed-summarization", max_samples, val_ratio
     )
-    return ds
 
 
-def prepare_dataset_for_bart_fact(
-    dataset_name="arxiv",
-    tokenizer=None,
-    max_input_length=1024,
-    max_target_length=256,
-    max_samples=None,
-):
-    """Shortcut for preparing data for BART-FaCT models."""
-    return prepare_dataset_for_model(
-        dataset_name=dataset_name,
-        tokenizer=tokenizer,
-        max_input_length=max_input_length,
-        max_target_length=max_target_length,
-        max_samples=max_samples,
-        is_bart_fact=True,
-    )
+# ── Field names are uniform across both datasets ───────────────────────
+
+INPUT_FIELD = "article"
+TARGET_FIELD = "abstract"
 
 
 # ── Statistics helpers ─────────────────────────────────────────────────
 
 
-def token_length_statistics(
-    dataset, text_field="article", tokenizer_name="facebook/bart-large"
-):
+def token_length_statistics(dataset, text_field: str = INPUT_FIELD,
+                             tokenizer_name: str = "facebook/bart-large"):
     """Compute token-length statistics for a dataset."""
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     lengths = []
     for sample in dataset.select(range(min(5000, len(dataset)))):
-        text = (
-            sample[text_field]
-            if text_field in sample
-            else sample.get("document", "")
-        )
+        text = sample.get(text_field, "")
         if text:
             lengths.append(len(tokenizer.encode(text, truncation=False)))
     lengths = np.array(lengths)
@@ -239,23 +132,6 @@ def token_length_statistics(
         "under_2048": float(np.mean(lengths <= 2048)),
     }
 
-
-def detect_sections_in_text(text: str) -> list:
-    """Detect section boundaries in a scientific paper."""
-    section_detector = SectionDetector()
-    spans = section_detector.detect_sections(text)
-    return [
-        {
-            "label": s.label,
-            "label_id": s.label_id,
-            "start": s.start_char,
-            "end": s.end_char,
-        }
-        for s in spans
-    ]
-
-
-# ── Data loader registry ───────────────────────────────────────────────
 
 DATA_LOADERS = {
     "arxiv": load_arxiv_dataset,

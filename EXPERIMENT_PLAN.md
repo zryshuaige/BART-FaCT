@@ -1,70 +1,62 @@
-# BART-FaCT 实验方案
+# SUMM-Lens 实验方案
 
 ## 论文题目
 
-**中文:** BART-FaCT: 基于层次化结构编码与校准式解码的长文档摘要事实性增强方法
+**中文：** SUMM-Lens：长文档摘要的零训练推理期增强 —— 基于链式密度与 NLI 重排的轻量级方法
 
-**English:** BART-FaCT: Faithfulness-Enhanced Long-Document Summarization via Hierarchical Structure Encoding and Calibrated Faithfulness Attention
+**English:** SUMM-Lens: Zero-Training Inference-Time Enhancements for Long-Document Summarization via Chain-of-Density Prompting and NLI Reranking
 
 ---
 
 ## 模块一览
 
-| 模块 | 全称 | 针对问题 | 灵感来源 |
-|:---|:---|:---|:---|
-| **HSE** | Hierarchical Structure Encoding | 扁平编码丢失文档层次结构（句子→段落→章节） | Liu & Lapata, EMNLP'19; Liu et al., TACL'23 |
-| **CFA** | Calibrated Faithfulness Attention | 解码器交叉注意力无法区分「检索」与「猜测」 | Chuang et al., ICLR'24; Shi et al., ACL'24 |
-| **CPO** | Contrastive Preference Optimization | MLE训练缺乏事实性偏好信号 | Rafailov et al., NeurIPS'23; Gao et al., EMNLP'24 |
+| 模块 | 全称 | 针对问题 | 训练？ | 灵感来源 |
+|:---|:---|:---|:---:|:---|
+| **CoD** | Chain-of-Density Prompting | 单次生成的摘要稀疏，遗漏关键实体/数字 | ✗ | Adams et al., EMNLP 2023 |
+| **NLR** | NLI-Rerank | 单条采样不可靠，需要从多候选中选最忠实的 | ✗ | Laban et al., TACL 2022 |
 
-详细设计见 README.md 和 README_zh.md。
+详细设计见 [README.md](README.md) 与 [README_zh.md](README_zh.md)。
 
 ---
 
 ## 实验设计
 
-### E1: 多模型对比
+### E1：基线阶梯对比（2019 → 2024）
 
 | 模型 | 预训练 | 参数 |
 |:---|:---|:---:|
 | BART-Large-CNN | CNN/DailyMail | 400M |
+| DistilBART-CNN | CNN/DailyMail | 306M |
 | PEGASUS-arXiv | arXiv | 568M |
-| PEGASUS-CNN/DM | CNN/DailyMail | 568M |
-| DistilBART-CNN-12-6 | BART-Large-CNN蒸馏 | 306M |
-| **BART-FaCT** | BART-Large-CNN + HSE + CFA + CPO | ~403M |
+| LED-large-arXiv | arXiv（长文档专用） | 460M |
+| **Qwen2.5-1.5B-Instruct** | 通用指令微调 | 1.5B |
 
-所有对比模型均为 HuggingFace 上预训练好的摘要模型，直接可跑推理。
+所有模型从 HuggingFace 直接 `from_pretrained` 加载，**仅推理，零训练**。
 
-### E2: 模块消融
+### E2：模块消融（同一主干 = Qwen2.5-1.5B-Instruct）
 
-| 配置 | HSE | CFA | CPO |
-|------|:---:|:---:|:---:|
-| BART-Large-CNN | ✗ | ✗ | ✗ |
-| w/o HSE | ✗ | ✓ | ✓ |
-| w/o CFA | ✓ | ✗ | ✓ |
-| w/o CPO | ✓ | ✓ | ✗ |
-| BART-FaCT (Full) | ✓ | ✓ | ✓ |
+| 配置 | CoD | NLR | 回答的问题 |
+|:---|:---:|:---:|:---|
+| Qwen2.5-Vanilla | ✗ | ✗ | 2024 LLM 在零样本下能达到什么水平？ |
+| + CoD | ✓ | ✗ | 单独的迭代密化是否提升 ROUGE / 忠实度？ |
+| + NLR | ✗ | ✓ | 单独的 NLI 候选选择是否提升？ |
+| **+ CoD + NLR** | **✓** | **✓** | 两者是否互补？ |
 
-### E3: 事实性分析
-NLI蕴含率、幻觉类型分布 (内在/外在/矛盾)、CFA各层门控分布
+### E3：忠实度分析
 
-### E4: 上下文长度消融
-256 / 512 / 768 / 1024 tokens
+NLI 蕴含率（RoBERTa-large-MNLI）、幻觉率、按候选打分的分布对比。
 
-### E5: 参数敏感性
-beam_size [1,2,4,6,8] / length_penalty [0.6,1.0,1.5,2.0,2.5] / CPO λ [0.01,0.05,0.1,0.2,0.5] / CFA瓶颈维度 [32,64,128,256] / LR [1e-5,3e-5,5e-5,1e-4]
-
-### E6: 截断策略
-head_only / tail_only / head_tail_mixed
+> 旧方案中的"上下文长度敏感性 / 学习率敏感性 / 截断策略"扫描在零训练设定下不再适用，已删除。
 
 ---
 
 ## 评估指标
 
-**质量:** ROUGE-1/2/L/Lsum, BERTScore F1, METEOR
+**质量：** ROUGE-1 / ROUGE-2 / ROUGE-L / ROUGE-Lsum，BERTScore F1，METEOR
 
-**事实性:** NLI Entailment Ratio, Hallucination Rate (intrinsic/extrinsic/contradiction), n-gram Overlap
+**忠实度：** NLI 蕴含率，逐候选蕴含分（仅 NLR 配置）
 
-**辅助:** Compression Ratio, JS Divergence, 4-gram Repetition Ratio
+**辅助：** JS 散度（bigram），4-gram 重复率，压缩比，新颖度
 
 ---
 
@@ -72,19 +64,24 @@ head_only / tail_only / head_tail_mixed
 
 ```bash
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-python src/run_experiments.py --mode full --dataset arxiv --max_samples 1000
-python src/run_experiments.py --mode ablation --ablation_type all
+
+# 冒烟测试（5 样本，免费 Colab/CPU 友好）
+python src/run_experiments.py --mode quick_test --dataset arxiv
+
+# 全套（baseline + ablation + figures）
+python src/run_experiments.py --mode all --dataset arxiv --num_test 100
+python src/run_experiments.py --mode all --dataset pubmed --num_test 100
 ```
+
+输出位置：`results/<timestamp>/`，含 `eval_results.json`（每模型）、`predictions.json`（前 50 条样例）、`figures/`（PNG/PDF/CSV）和 `all_results.json`（聚合）。
 
 ---
 
 ## 参考文献
 
-1. Liu & Lapata. "Hierarchical Transformers for Long Document Summarization." EMNLP 2019.
-2. Chuang et al. "DoLa: Decoding by Contrasting Layers Improves Factuality." ICLR 2024.
-3. Rafailov et al. "Direct Preference Optimization." NeurIPS 2023.
-4. Shi et al. "Context-Aware Decoding for Faithful Summarization." ACL 2024.
-5. Gao et al. "Model-based Preference Optimization in Summarization without Human Feedback." EMNLP 2024.
-6. Liu et al. "Lost in the Middle: How Language Models Use Long Contexts." TACL 2023.
-7. Lewis et al. "BART: Denoising Sequence-to-Sequence Pre-training." ACL 2020.
-8. Zhang et al. "PEGASUS: Pre-training with Extracted Gap-sentences." ICML 2020.
+1. Adams G, et al. *From Sparse to Dense: GPT-4 Summarization with the Chain of Density Prompt.* EMNLP 2023.
+2. Laban P, et al. *SummaC: Re-Visiting NLI-based Models for Inconsistency Detection in Summarization.* TACL 2022.
+3. Qwen Team. *Qwen2.5 Technical Report.* 2024.
+4. Lewis M, et al. *BART: Denoising Sequence-to-Sequence Pre-training.* ACL 2020.
+5. Zhang J, et al. *PEGASUS: Pre-training with Extracted Gap-sentences for Abstractive Summarization.* ICML 2020.
+6. Beltagy I, et al. *Longformer: The Long-Document Transformer.* arXiv:2004.05150, 2020.
